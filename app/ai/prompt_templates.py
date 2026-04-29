@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+from string import Template
+
+CONTENT_ANALYSIS_PROMPT = Template("""
+You are an expert presentation content analyst. Analyze the following document content and extract structured information.
+
+Document content:
+$content
+
+Return a JSON object with this exact structure:
+{
+  "title": "Suggested presentation title",
+  "key_topics": ["topic1", "topic2", ...],
+  "summary": "Brief 2-3 sentence summary of the content",
+  "audience": "Target audience description",
+  "tone": "professional|casual|technical|inspirational",
+  "estimated_slides": <number between 8 and 15>,
+  "sections": [
+    {"name": "section name", "content": "key points from this section", "slide_count": <number>}
+  ]
+}
+
+Respond with valid JSON only, no markdown or extra text.
+""")
+
+OUTLINE_GENERATION_PROMPT = Template("""
+You are an expert presentation strategist. Your job is to create a concise, structured outline for a presentation based on the document analysis provided. Do NOT write full content — only identify the slides needed and their key points.
+
+Document Analysis:
+$analysis
+
+Generate an outline for a presentation with $slide_count slides.
+
+Rules:
+- First slide must be type "title"
+- Last slide must be type "closing"
+- Include at least one "agenda" slide near the start
+- Use types: title | agenda | content | quote | stats | closing
+- key_points must be 2-3 short phrases (not full sentences) describing what this slide will cover
+- All content must be grounded in the source document — no invented topics
+
+Return a JSON array with exactly $slide_count items:
+[
+  {
+    "order": 1,
+    "type": "title|agenda|content|quote|stats|closing",
+    "title": "Short slide title (≤8 words)",
+    "key_points": ["key point 1", "key point 2", "key point 3"]
+  }
+]
+
+Respond with valid JSON array only — no markdown fences, no explanation.
+""")
+
+SLIDE_CONTENT_PROMPT = Template("""
+You are an expert presentation content writer. Generate the full content for ONE slide based on the outline item and document context provided. Do NOT decide layout, colors, fonts, or visuals — the system handles all of that.
+
+Slide Outline Item:
+$outline_item
+
+Full Document Context:
+$analysis_summary
+
+Slide type: $slide_type
+
+Write content appropriate for this slide type:
+- "title": strong headline (≤8 words) as heading + punchy tagline (≤15 words) as a subtitle bullet
+- "agenda": heading + 4-6 section names as bullets
+- "content": heading (≤6 words) + 3-5 bullets (10-20 words each, concrete and specific) + optional body paragraph
+- "quote": one memorable quote (20-40 words) as quote + attribution as caption
+- "stats": heading + 3-4 data points as stats in format "VALUE Label" (e.g. "47% Cost Reduction")
+- "closing": call-to-action headline as heading + contact/next-step as subtitle bullet
+
+Return a single JSON object (NOT an array):
+{
+  "heading": "Slide heading text",
+  "body": "Optional body paragraph text (for content slides), empty string otherwise",
+  "bullets": ["bullet point 1", "bullet point 2"],
+  "stats": ["47% Cost Reduction", "$2.4B Market Size"],
+  "quote": "Quote text if this is a quote slide, empty string otherwise",
+  "caption": "Attribution or caption text, empty string if not applicable"
+}
+
+Rules:
+- All fields are always present; use empty string "" or empty array [] when not applicable
+- "stats" array only for stats slides; "quote" only for quote slides
+- All content must come from the source document — no placeholders, no invented facts
+- Respond with valid JSON object only — no markdown fences, no explanation
+""")
+
+PREVIEW_GENERATION_PROMPT = Template("""
+You are a presentation content creator. Generate a complete sample presentation for the template "$template_name".
+
+Template category: $category
+Target audience: $audience
+Theme: $theme_name
+
+Generate a realistic sample presentation with $slide_count slides demonstrating this template's structure.
+
+Return a JSON array of slides:
+[
+  {
+    "order": 1,
+    "type": "title",
+    "blocks": [
+      {
+        "id": "unique-block-id",
+        "type": "text|image|title|subtitle|bullet",
+        "content": "sample content here"
+      }
+    ]
+  }
+]
+
+Make the content realistic, professional, and relevant to the template's purpose.
+Respond with valid JSON array only.
+""")
+
+
+COMBINED_GENERATION_PROMPT = Template("""
+You are a professional presentation creator. Analyze the provided content and generate a complete presentation in ONE response.
+
+User prompt: $prompt
+
+Document content:
+$content
+
+Required slide count: $slide_count
+
+Instructions:
+1. Analyze the content to extract title, summary, audience, and sections
+2. Generate slide content for exactly $slide_count slides (title slide first, agenda second, closing last, content/stats in between)
+3. Use type "stats" for slides with numeric data/metrics, "content" for everything else
+
+Return ONLY this JSON structure (no markdown, no explanation):
+{
+  "title": "Presentation title (≤10 words)",
+  "summary": "2-3 sentence summary",
+  "audience": "Target audience",
+  "tone": "professional",
+  "sections": [
+    {"name": "section name", "content": "key points", "slide_count": 1}
+  ],
+  "slides": [
+    {
+      "type": "title|agenda|content|stats|closing",
+      "heading": "Slide heading (≤8 words)",
+      "body": "",
+      "bullets": ["bullet 1", "bullet 2"],
+      "stats": [],
+      "quote": "",
+      "caption": ""
+    }
+  ]
+}
+
+Rules:
+- slides array must have exactly $slide_count items
+- slides[0] is always type "title"
+- slides[1] is always type "agenda" with bullets listing section names
+- slides[-1] is always type "closing"
+- stats array only used for type "stats" slides (format: "47% Cost Reduction")
+- bullets empty for title and closing slides
+- All content must come from the source document — no invented facts
+- All fields always present, use "" or [] when not applicable
+""")
+
+
+def render(template: Template, **kwargs) -> str:
+    return template.substitute(**kwargs)

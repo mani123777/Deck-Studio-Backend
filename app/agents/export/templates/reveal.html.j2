@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ presentation.title }}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.6.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.6.0/dist/theme/white.css" />
+  <style>
+    :root {
+      --primary: {{ colors.primary }};
+      --secondary: {{ colors.secondary }};
+      --accent: {{ colors.accent }};
+      --background: {{ colors.background }};
+      --text-color: {{ colors.text }};
+      --heading-font: '{{ fonts.heading.family }}', sans-serif;
+      --body-font: '{{ fonts.body.family }}', sans-serif;
+    }
+    .reveal .slides section {
+      background-color: var(--background);
+      color: var(--text-color);
+      font-family: var(--body-font);
+      height: 100%;
+      text-align: left;
+      padding: 40px;
+      box-sizing: border-box;
+    }
+    .reveal h1, .reveal h2, .reveal h3 {
+      font-family: var(--heading-font);
+      color: var(--primary);
+    }
+    .slide-block {
+      position: absolute;
+      overflow: hidden;
+    }
+    .slide-block.type-title, .slide-block.type-heading {
+      font-family: var(--heading-font);
+      font-weight: {{ fonts.heading.weight }};
+      color: var(--primary);
+    }
+    .slide-block.type-caption {
+      font-family: var(--body-font);
+      font-size: 0.8em;
+      color: var(--secondary);
+    }
+    .slide-container {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      transform-origin: top left;
+      background-color: var(--background);
+    }
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+      {% for slide in slides %}
+      <section>
+        <div class="slide-container" style="transform: scale(0.5);">
+          {% for block in slide.blocks %}
+          <div
+            class="slide-block type-{{ block.type }}"
+            style="
+              left: {{ block.position.x }}px;
+              top: {{ block.position.y }}px;
+              width: {{ block.position.w }}px;
+              height: {{ block.position.h }}px;
+              font-family: '{{ block.styling.font_family }}', sans-serif;
+              font-size: {{ block.styling.font_size }}px;
+              font-weight: {{ block.styling.font_weight }};
+              color: {{ block.styling.color }};
+              background-color: {{ block.styling.background_color }};
+              text-align: {{ block.styling.text_align }};
+            "
+          >
+            {% if block.type == 'image' %}
+              {% if block.content %}
+                <img src="{{ block.content }}" alt="image" style="max-width:100%;max-height:100%;object-fit:contain;" />
+              {% endif %}
+            {% else %}
+              {{ block.content }}
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.6.0/dist/reveal.js"></script>
+  <script>
+    Reveal.initialize({
+      hash: true,
+      slideNumber: true,
+      transition: 'slide',
+      width: 1920,
+      height: 1080,
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') Reveal.prev();
+      if (e.key === 'ArrowRight') Reveal.next();
+    });
+  </script>
+</body>
+</html>
