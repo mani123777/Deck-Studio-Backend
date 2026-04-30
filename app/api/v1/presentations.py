@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.gemini_client import generate_json
 from app.api.dependencies import get_current_user
 from app.core.database import get_db
 from app.models.user import User
@@ -12,6 +15,7 @@ from app.schemas.presentation import (
     CreatePresentationRequest,
     PresentationDetail,
     PresentationListItem,
+    SlideSchema,
     UpdatePresentationRequest,
 )
 from app.services import presentation_service
@@ -63,3 +67,50 @@ async def delete_presentation(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await presentation_service.delete_presentation(db, current_user, presentation_id)
+
+
+class SlideChatRequest(BaseModel):
+    slide: dict[str, Any]
+    message: str
+
+
+class SlideChatResponse(BaseModel):
+    updated_slide: dict[str, Any]
+    response: str
+
+
+@router.post("/{presentation_id}/slide-chat", response_model=SlideChatResponse)
+async def slide_chat(
+    presentation_id: str,
+    req: SlideChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SlideChatResponse:
+    slide_json = json.dumps(req.slide)
+    prompt = f"""You are an AI slide editor. The user wants to modify a presentation slide.
+
+Current slide (JSON):
+{slide_json}
+
+User request: "{req.message}"
+
+Apply the requested change to the slide and return a JSON object with exactly these two keys:
+- "updated_slide": the full modified slide JSON (same structure as the input, with changes applied)
+- "response": a short confirmation message describing what was changed (1-2 sentences)
+
+Rules:
+- Only change what the user asked for. Do not restructure or remove blocks unless asked.
+- For background changes: set slide.background.type to "color" or "gradient" and slide.background.value to the CSS value.
+- For text color changes: update styling.color on the relevant blocks.
+- For font size changes: update styling.font_size on the relevant blocks.
+- For content changes: update the block's content field.
+- Return valid JSON only, no markdown fences."""
+
+    try:
+        result = await generate_json(prompt)
+        return SlideChatResponse(
+            updated_slide=result["updated_slide"],
+            response=result["response"],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

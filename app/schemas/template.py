@@ -21,6 +21,8 @@ class TemplateListItem(BaseModel):
     theme_id: str
     is_active: bool
     metadata: TemplateMetadataSchema
+    preview_slide: Optional[dict] = None
+    theme: Optional[dict] = None
 
 
 class TemplateDetail(TemplateListItem):

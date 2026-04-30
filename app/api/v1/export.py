@@ -44,12 +44,12 @@ async def download_export(
     db: AsyncSession = Depends(get_db),
 ):
     job_resp = await export_service.get_export_status(db, current_user, job_id)
-    if job_resp.status != "completed" or not job_resp.file_path:
+    if job_resp.status != "completed" or not job_resp.file_url:
         raise NotFoundError("Export file not ready")
-    if not os.path.exists(job_resp.file_path):
+    if not os.path.exists(job_resp.file_url):
         raise NotFoundError("Export file not found on disk")
     return FileResponse(
-        path=job_resp.file_path,
-        filename=os.path.basename(job_resp.file_path),
+        path=job_resp.file_url,
+        filename=os.path.basename(job_resp.file_url),
         media_type="application/octet-stream",
     )

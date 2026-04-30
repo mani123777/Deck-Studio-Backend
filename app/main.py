@@ -103,20 +103,31 @@ def create_app() -> FastAPI:
     from app.api.v1.generation import router as generation_router
     from app.api.v1.presentations import router as presentations_router
     from app.api.v1.export import router as export_router
+    from app.api.v1.import_pptx import router as import_router
+    from app.api.v1.themes import router as themes_router
+    from app.api.v1.share import router as share_router
 
     app.include_router(auth_router, prefix=API_V1)
+    app.include_router(themes_router, prefix=API_V1)
     app.include_router(templates_router, prefix=API_V1)
     app.include_router(generation_router, prefix=API_V1)
     from app.api.v1.generate_sync import router as generate_sync_router
     app.include_router(generate_sync_router, prefix=API_V1)
     app.include_router(presentations_router, prefix=API_V1)
     app.include_router(export_router, prefix=API_V1)
+    app.include_router(import_router, prefix=API_V1)
+    app.include_router(share_router, prefix=API_V1)
 
     # Serve seed preview thumbnails as static files
     from pathlib import Path
     previews_dir = Path(__file__).resolve().parent.parent / "seeds" / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/previews", StaticFiles(directory=str(previews_dir)), name="previews")
+
+    # Serve imported PPTX slide images as static files
+    imports_dir = Path(__file__).resolve().parent.parent / "storage" / "imports"
+    imports_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/imports", StaticFiles(directory=str(imports_dir)), name="imports")
 
     return app
 

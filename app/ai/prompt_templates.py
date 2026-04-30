@@ -39,6 +39,8 @@ Rules:
 - Use types: title | agenda | content | quote | stats | closing
 - key_points must be 2-3 short phrases (not full sentences) describing what this slide will cover
 - All content must be grounded in the source document — no invented topics
+- Each slide must cover a DISTINCT angle or sub-topic — key_points must NOT overlap or repeat across slides
+- Slide titles must be unique; if topics are closely related, split them by depth (definition → process → examples → comparison) rather than restating the same idea
 
 Return a JSON array with exactly $slide_count items:
 [
@@ -56,8 +58,11 @@ Respond with valid JSON array only — no markdown fences, no explanation.
 SLIDE_CONTENT_PROMPT = Template("""
 You are an expert presentation content writer. Generate the full content for ONE slide based on the outline item and document context provided. Do NOT decide layout, colors, fonts, or visuals — the system handles all of that.
 
-Slide Outline Item:
+Slide Outline Item (THIS slide):
 $outline_item
+
+Full Presentation Outline (ALL slides — for context, do NOT generate content for these):
+$full_outline
 
 Full Document Context:
 $analysis_summary
@@ -86,6 +91,8 @@ Rules:
 - All fields are always present; use empty string "" or empty array [] when not applicable
 - "stats" array only for stats slides; "quote" only for quote slides
 - All content must come from the source document — no placeholders, no invented facts
+- Restrict yourself STRICTLY to THIS slide's key_points. Do NOT repeat bullets, examples, or framings already assigned to other slides in the full outline above
+- If THIS slide's topic overlaps another, focus on the unique angle implied by THIS slide's title and key_points only
 - Respond with valid JSON object only — no markdown fences, no explanation
 """)
 

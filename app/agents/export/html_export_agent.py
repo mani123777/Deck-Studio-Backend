@@ -24,6 +24,9 @@ class HtmlExportAgent:
     async def run(self, presentation: Presentation, theme: Theme) -> Path:
         template = self._env.get_template("reveal.html.j2")
 
+        colors = theme.colors  # dict: {primary, secondary, accent, background, text}
+        fonts = theme.fonts    # dict: {heading, body, caption} each {family, size, weight}
+
         slides_data = []
         for slide in sorted(presentation.slides or [], key=lambda s: s.get("order", 0)):
             blocks_data = []
@@ -42,14 +45,21 @@ class HtmlExportAgent:
                         "text_align": "left",
                     }),
                 })
+            bg = slide.get("background") or {}
+            bg_type  = bg.get("type", "color")
+            bg_value = bg.get("value", colors.get("background", "#ffffff"))
+            if bg_type == "gradient":
+                bg_css = bg_value
+            elif bg_type == "image":
+                bg_css = f"url({bg_value}) center/cover no-repeat"
+            else:
+                bg_css = bg_value
             slides_data.append({
                 "order": slide.get("order", 0),
                 "type": slide.get("type", "content"),
+                "background_css": bg_css,
                 "blocks": blocks_data,
             })
-
-        colors = theme.colors  # dict: {primary, secondary, accent, background, text}
-        fonts = theme.fonts    # dict: {heading, body, caption} each {family, size, weight}
 
         html_content = template.render(
             presentation=presentation,

@@ -530,20 +530,35 @@ class SlideGeneratorAgent:
         max_concurrency: int = 3,
     ) -> list[dict]:
         analysis_summary = json.dumps(analysis, indent=2)
+        outline_summary = json.dumps(
+            [
+                {
+                    "order": item.get("order"),
+                    "type": item.get("type"),
+                    "title": item.get("title"),
+                    "key_points": item.get("key_points", []),
+                }
+                for item in outline
+            ],
+            indent=2,
+        )
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _throttled(item: dict) -> dict:
             async with semaphore:
-                return await self._generate_slide_content(item, analysis_summary)
+                return await self._generate_slide_content(item, analysis_summary, outline_summary)
 
         logger.info(f"Generating {len(outline)} slides (max {max_concurrency} concurrent)")
         contents = await asyncio.gather(*[_throttled(item) for item in outline])
         return self._build_slides(outline, list(contents), mapping, logo_url)
 
-    async def _generate_slide_content(self, outline_item: dict, analysis_summary: str) -> dict:
+    async def _generate_slide_content(
+        self, outline_item: dict, analysis_summary: str, full_outline: str
+    ) -> dict:
         prompt = render(
             SLIDE_CONTENT_PROMPT,
             outline_item=json.dumps(outline_item, indent=2),
+            full_outline=full_outline,
             analysis_summary=analysis_summary,
             slide_type=outline_item.get("type", "content"),
         )

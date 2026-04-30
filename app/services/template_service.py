@@ -6,11 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.exceptions import NotFoundError
+from app.models.presentation import Presentation
 from app.models.template import Template
+from app.models.theme import Theme
 from app.schemas.template import TemplateDetail, TemplateListItem, TemplateMetadataSchema
 
 
-def _to_list_item(t: Template) -> TemplateListItem:
+def _to_list_item(
+    t: Template,
+    preview_slide: Optional[dict] = None,
+    theme: Optional[Theme] = None,
+) -> TemplateListItem:
     meta = t.metadata_json or {}
     return TemplateListItem(
         id=str(t.id),
@@ -25,6 +31,17 @@ def _to_list_item(t: Template) -> TemplateListItem:
             total_slides=meta.get("total_slides", 0),
             estimated_duration=meta.get("estimated_duration", 0),
             default_audience=meta.get("default_audience", ""),
+        ),
+        preview_slide=preview_slide,
+        theme=(
+            {
+                "id": str(theme.id),
+                "name": theme.name,
+                "colors": theme.colors,
+                "fonts": theme.fonts,
+            }
+            if theme
+            else None
         ),
     )
 
@@ -66,7 +83,46 @@ async def list_templates(
     if tags:
         templates = [t for t in templates if all(tag in (t.tags or []) for tag in tags)]
 
-    return [_to_list_item(t) for t in templates]
+    # Batch-load themes
+    theme_ids = list({t.theme_id for t in templates})
+    theme_rows = (
+        await db.execute(select(Theme).where(Theme.id.in_(theme_ids)))
+    ).scalars().all()
+    theme_map = {str(th.id): th for th in theme_rows}
+
+    # Batch-load cached preview presentations (first slide only is needed)
+    template_ids = [str(t.id) for t in templates]
+    preview_rows = (
+        await db.execute(
+            select(Presentation).where(
+                Presentation.template_id.in_(template_ids),
+                Presentation.is_preview == True,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+    preview_map: dict[str, dict] = {}
+    for p in preview_rows:
+        slides = p.slides or []
+        if slides:
+            preview_map[str(p.template_id)] = slides[0]
+
+    def _first_slide(t: Template) -> Optional[dict]:
+        # Prefer the cached preview's first slide; fall back to the raw template
+        # JSON's first slide so thumbnails render before any preview is generated.
+        cached = preview_map.get(str(t.id))
+        if cached:
+            return cached
+        raw = t.slides or []
+        return raw[0] if raw else None
+
+    return [
+        _to_list_item(
+            t,
+            preview_slide=_first_slide(t),
+            theme=theme_map.get(str(t.theme_id)),
+        )
+        for t in templates
+    ]
 
 
 async def get_template(db: AsyncSession, template_id: str) -> TemplateDetail:

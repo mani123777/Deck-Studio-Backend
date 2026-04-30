@@ -53,6 +53,7 @@ class PresentationListItem(BaseModel):
     slide_count: int
     created_at: str
     updated_at: str = ""
+    preview_slide: Optional[SlideSchema] = None
 
 
 class PresentationDetail(PresentationListItem):

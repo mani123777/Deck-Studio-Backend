@@ -27,6 +27,7 @@ def _slide_count(p: Presentation) -> int:
 
 def _to_list_item(p: Presentation, template_name: str = "") -> PresentationListItem:
     count = _slide_count(p)
+    first_slide_schemas = _slide_dicts_to_schemas(p.slides[:1]) if p.slides else []
     return PresentationListItem(
         id=str(p.id),
         title=p.title,
@@ -39,6 +40,7 @@ def _to_list_item(p: Presentation, template_name: str = "") -> PresentationListI
         slide_count=count,
         created_at=p.created_at.isoformat() if p.created_at else "",
         updated_at=p.updated_at.isoformat() if p.updated_at else "",
+        preview_slide=first_slide_schemas[0] if first_slide_schemas else None,
     )
 
 
@@ -95,7 +97,7 @@ async def list_presentations(
     stmt = select(Presentation).where(Presentation.user_id == user.id)
     if is_preview is not None:
         stmt = stmt.where(Presentation.is_preview == is_preview)
-    stmt = stmt.order_by(Presentation.created_at.desc())
+    stmt = stmt.order_by(Presentation.updated_at.desc())
     items = (await db.execute(stmt)).scalars().all()
 
     # Batch-load template names

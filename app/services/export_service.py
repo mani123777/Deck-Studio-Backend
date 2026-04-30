@@ -41,8 +41,10 @@ async def start_export(
     await db.commit()
     await db.refresh(job)
 
-    from app.tasks.export_tasks import export_presentation_task
-    export_presentation_task.delay(str(job.id))
+    # Run export in the background via asyncio (no Celery worker required)
+    import asyncio
+    from app.tasks.export_tasks import _run_export
+    asyncio.create_task(_run_export(str(job.id)))
 
     return _to_response(job)
 
