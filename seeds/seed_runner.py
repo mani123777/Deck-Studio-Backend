@@ -489,7 +489,7 @@ async def fill_placeholders(template_data: dict) -> dict:
     return filled
 
 
-async def seed_templates(db, theme_id_map: dict[str, str], force_rebuild: bool = False) -> None:
+async def seed_templates(db, theme_id_map: dict[str, str], force_rebuild: bool = False, skip_previews: bool = False) -> None:
     """Upsert all templates and generate PPTX previews."""
     from sqlalchemy import select
     from app.models.template import Template
@@ -531,7 +531,9 @@ async def seed_templates(db, theme_id_map: dict[str, str], force_rebuild: bool =
         ).scalar_one_or_none()
         theme_data_for_preview = {"colors": theme_obj.colors, "fonts": theme_obj.fonts} if theme_obj else None
 
-        if theme_data_for_preview:
+        if skip_previews:
+            preview_path = None
+        elif theme_data_for_preview:
             try:
                 slide_count = metadata.get("total_slides", 8)
                 logger.info(f"Generating AI slides for '{name}' ({slide_count} slides)...")
