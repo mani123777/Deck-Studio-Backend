@@ -5,5 +5,17 @@ from app.models.template import Template
 from app.models.presentation import Presentation
 from app.models.generation_job import GenerationJob
 from app.models.export_job import ExportJob
+from app.models.project import Project, ProjectDocument, ProjectPresentationLink
 
-ALL_MODELS = [User, RefreshToken, Theme, Template, Presentation, GenerationJob, ExportJob]
+ALL_MODELS = [
+    User,
+    RefreshToken,
+    Theme,
+    Template,
+    Presentation,
+    GenerationJob,
+    ExportJob,
+    Project,
+    ProjectDocument,
+    ProjectPresentationLink,
+]
