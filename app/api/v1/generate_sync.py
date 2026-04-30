@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from lxml import html as lxml_html
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,17 +42,82 @@ async def _extract_file_text(file: UploadFile) -> str:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+async def _extract_url_text(url: str) -> tuple[str, str]:
+    """Fetch a URL and return (title, readable_text). Raises HTTPException on failure."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="URL must use http or https")
+    if not parsed.netloc:
+        raise HTTPException(status_code=400, detail="URL is malformed")
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; WACDeckStudio/1.0)",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not fetch URL: {exc}"
+        ) from exc
+
+    ctype = resp.headers.get("content-type", "")
+    if "html" not in ctype and "text" not in ctype:
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL returned unsupported content-type '{ctype}'.",
+        )
+
+    try:
+        doc = lxml_html.fromstring(resp.text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to parse HTML: {exc}") from exc
+
+    # Strip noisy elements
+    for tag in doc.xpath(
+        "//script | //style | //noscript | //nav | //footer | //header"
+        " | //aside | //form | //iframe | //svg"
+    ):
+        tag.getparent().remove(tag) if tag.getparent() is not None else None
+
+    title_el = doc.find(".//title")
+    title = (title_el.text_content().strip() if title_el is not None else "") or url
+
+    # Prefer <article> / <main>; fall back to <body>
+    candidates = doc.xpath("//article") or doc.xpath("//main") or doc.xpath("//body")
+    root = candidates[0] if candidates else doc
+    text = root.text_content()
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = "\n".join(line.strip() for line in text.splitlines())
+    text = text.strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="No readable text found at URL.")
+    return title, text
+
+
 @router.post("/sync", response_model=PreviewResponse)
 async def generate_sync(
-    prompt: str = Form(...),
+    prompt: str = Form(""),
     slide_count: int = Form(10),
     file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PreviewResponse:
     """
     Synchronous generation: returns {slides, theme} in one request.
     Single Gemini API call — analysis + slide content combined.
+
+    Source content priority (concatenated, when present):
+      prompt + uploaded file text + URL-fetched text
+    At least one of {prompt, file, url} must be supplied.
     """
     from app.agents.generation.preview_generator_agent import _build_outline
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
@@ -56,16 +125,40 @@ async def generate_sync(
 
     slide_count = max(5, min(20, slide_count))
 
-    # Extract file text if provided
-    content = prompt
+    # Build the source content from prompt + optional file + optional url
+    parts: list[str] = []
+    prompt = (prompt or "").strip()
+    if prompt:
+        parts.append(prompt)
+
     if file and file.filename:
         try:
             file_text = await _extract_file_text(file)
             if len(file_text) > 50_000:
                 file_text = file_text[:50_000] + "\n...[content truncated]"
-            content = f"{prompt}\n\n{file_text}" if prompt else file_text
+            parts.append(file_text)
+        except HTTPException:
+            raise
         except Exception as exc:
-            logger.warning(f"File extraction failed, using prompt only: {exc}")
+            logger.warning(f"File extraction failed, ignoring file: {exc}")
+
+    url_value = (url or "").strip()
+    if url_value:
+        title, page_text = await _extract_url_text(url_value)
+        if len(page_text) > 50_000:
+            page_text = page_text[:50_000] + "\n...[content truncated]"
+        parts.append(f"Source: {url_value}\nTitle: {title}\n\n{page_text}")
+
+    if not parts:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a prompt, a document, or a URL.",
+        )
+
+    content = "\n\n".join(parts)
+    # Keep `prompt` field non-empty so downstream prompt template formats cleanly
+    if not prompt:
+        prompt = f"Create a presentation from the provided source material."
 
     # Single Gemini call — analyze content + generate all slide content
     combined_prompt = render(
