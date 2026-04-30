@@ -1,0 +1,31 @@
+# Nixpacks build config — tells Railway which native libs to include
+# so WeasyPrint (PDF), pytesseract (OCR), and aiomysql work in production.
+
+[phases.setup]
+# Nix package names (not apt). Found via https://search.nixos.org/packages
+nixPkgs = [
+  "python311",
+  "gcc",
+  "pkg-config",
+  # WeasyPrint runtime
+  "pango",
+  "cairo",
+  "gdk-pixbuf",
+  "libffi",
+  "shared-mime-info",
+  "fontconfig",
+  "freetype",
+  # Fallback fonts so PDFs aren't blank
+  "liberation_ttf",
+  "dejavu_fonts",
+  # OCR
+  "tesseract",
+  # MySQL client libs
+  "libmysqlclient",
+]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
