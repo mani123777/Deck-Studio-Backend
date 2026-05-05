@@ -12,7 +12,11 @@ celery_app = Celery(
     "wacdeckstudio",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.generation_tasks", "app.tasks.export_tasks"],
+    include=[
+        "app.tasks.generation_tasks",
+        "app.tasks.export_tasks",
+        "app.tasks.extraction_tasks",
+    ],
 )
 
 celery_app.conf.update(

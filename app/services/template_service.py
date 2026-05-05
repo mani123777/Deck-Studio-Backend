@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.core.exceptions import NotFoundError
 from app.models.presentation import Presentation
 from app.models.template import Template
 from app.models.theme import Theme
+from app.models.user import User
 from app.schemas.template import TemplateDetail, TemplateListItem, TemplateMetadataSchema
 
 
@@ -43,6 +44,11 @@ def _to_list_item(
             if theme
             else None
         ),
+        slide_source=getattr(t, "slide_source", "rich"),
+        is_system=bool(getattr(t, "is_system", False)),
+        is_published=bool(getattr(t, "is_published", True)),
+        created_by=str(t.created_by) if getattr(t, "created_by", None) else None,
+        role=getattr(t, "role", None),
     )
 
 
@@ -64,16 +70,55 @@ def _to_detail(t: Template) -> TemplateDetail:
         ),
         slides=t.slides or [],
         preview_presentation_id=t.preview_pptx_path or None,
+        slide_source=getattr(t, "slide_source", "rich"),
+        is_system=bool(getattr(t, "is_system", False)),
+        is_published=bool(getattr(t, "is_published", True)),
+        created_by=str(t.created_by) if getattr(t, "created_by", None) else None,
+        role=getattr(t, "role", None),
     )
 
 
 async def list_templates(
     db: AsyncSession,
+    user: Optional[User] = None,
     category: Optional[str] = None,
     tags: Optional[list[str]] = None,
     is_active: bool = True,
+    source_filter: Optional[str] = None,  # 'mine' | 'builtin' | 'all' | None
 ) -> list[TemplateListItem]:
+    """Return templates visible to `user`.
+
+    Visibility:
+      - is_system=true OR is_published=true → visible to all authenticated users
+      - else → only visible to created_by (and platform admins)
+
+    `source_filter` narrows further:
+      - 'mine'    → only templates the caller created (any publish state)
+      - 'builtin' → only is_system=true (seeded built-ins)
+      - 'all' / None → everything visible
+    """
     stmt = select(Template).where(Template.is_active == is_active)
+
+    is_admin = bool(user) and getattr(user, "role", None) == "admin"
+
+    if user is not None and not is_admin:
+        # Default visibility filter — admins bypass this so they can audit
+        # everything (and to support the future publishing-management UI).
+        stmt = stmt.where(
+            or_(
+                Template.is_system.is_(True),
+                Template.is_published.is_(True),
+                Template.created_by == str(user.id),
+            )
+        )
+
+    if source_filter == "mine":
+        if user is None:
+            return []
+        stmt = stmt.where(Template.created_by == str(user.id))
+    elif source_filter == "builtin":
+        stmt = stmt.where(Template.is_system.is_(True))
+
     if category:
         stmt = stmt.where(Template.category == category)
     result = await db.execute(stmt)

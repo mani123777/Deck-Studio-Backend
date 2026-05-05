@@ -39,6 +39,14 @@ class ProjectListItem(BaseModel):
     updated_at: str
 
 
+class ProjectListPage(BaseModel):
+    """Versioned paginated response — opt in via `?paginated=true`."""
+    items: list[ProjectListItem]
+    total: int
+    limit: int
+    offset: int
+
+
 # ── Document ─────────────────────────────────────────────────────────────────
 
 class DocumentListItem(BaseModel):
@@ -79,6 +87,17 @@ class ProjectPresentationItem(BaseModel):
     title: str
     slide_count: int
     created_at: str
+    prior_link_id: Optional[str] = None
+    version: int = 1
+
+
+class RegenerateRequest(BaseModel):
+    """All fields optional — defaults pulled from the prior link."""
+    document_ids: Optional[list[str]] = None
+    template_id: Optional[str] = None
+    theme_id: Optional[str] = None
+    title: Optional[str] = None
+    role: Optional[RoleType] = None  # allows changing role on regen
 
 
 # ── Project detail (composite) ───────────────────────────────────────────────

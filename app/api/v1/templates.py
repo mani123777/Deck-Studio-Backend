@@ -19,8 +19,21 @@ from app.models.template import Template
 from app.models.theme import Theme
 from app.models.user import User
 from app.schemas.presentation import PresentationDetail
-from app.schemas.template import PreviewResponse, TemplateDetail, TemplateListItem
-from app.services import presentation_service, template_service
+from app.schemas.template import (
+    GenerateFromSimpleTemplateRequest,
+    PreviewResponse,
+    TemplateCreateRequest,
+    TemplateDetail,
+    TemplateListItem,
+    TemplatePublishRequest,
+    TemplateUpdateRequest,
+)
+from app.services import (
+    presentation_service,
+    simple_template_generation_service,
+    template_creation_service,
+    template_service,
+)
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -31,19 +44,86 @@ _PLACEHOLDER_RE = re.compile(r"\[PLACEHOLDER[^\]]*\]", re.IGNORECASE)
 async def list_templates(
     category: Optional[str] = Query(None),
     tags: Optional[list[str]] = Query(None),
-    _user: User = Depends(get_current_user),
+    source: Optional[str] = Query(
+        None,
+        description="Filter: 'mine' | 'builtin' | 'all' (omit = all visible)",
+    ),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[TemplateListItem]:
-    return await template_service.list_templates(db, category=category, tags=tags)
+    if source not in (None, "mine", "builtin", "all"):
+        source = None
+    return await template_service.list_templates(
+        db, user=user, category=category, tags=tags, source_filter=source
+    )
+
+
+@router.post("", response_model=TemplateDetail, status_code=status.HTTP_201_CREATED)
+async def create_template(
+    req: TemplateCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TemplateDetail:
+    return await template_creation_service.create_template(db, user, req)
 
 
 @router.get("/{template_id}", response_model=TemplateDetail)
 async def get_template(
     template_id: str,
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TemplateDetail:
-    return await template_service.get_template(db, template_id)
+    return await template_creation_service.get_template_detail(db, user, template_id)
+
+
+@router.put("/{template_id}", response_model=TemplateDetail)
+async def update_template(
+    template_id: str,
+    req: TemplateUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TemplateDetail:
+    return await template_creation_service.update_template(
+        db, user, template_id, req
+    )
+
+
+@router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_template(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await template_creation_service.delete_template(db, user, template_id)
+
+
+@router.post("/{template_id}/publish", response_model=TemplateDetail)
+async def publish_template(
+    template_id: str,
+    req: TemplatePublishRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TemplateDetail:
+    return await template_creation_service.set_published(
+        db, user, template_id, req.is_published
+    )
+
+
+@router.post(
+    "/{template_id}/generate-simple",
+    response_model=PresentationDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate a presentation from a 'simple' (wizard-built) template",
+)
+async def generate_simple(
+    template_id: str,
+    req: GenerateFromSimpleTemplateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PresentationDetail:
+    return await simple_template_generation_service.generate_from_simple_template(
+        db, user, template_id, req
+    )
 
 
 @router.get("/{template_id}/preview", response_model=PreviewResponse)

@@ -69,15 +69,20 @@ def _link_to_item(
         title=presentation.title if presentation else "",
         slide_count=len(presentation.slides) if presentation and presentation.slides else 0,
         created_at=_ts(link.created_at),
+        prior_link_id=str(link.prior_link_id) if link.prior_link_id else None,
+        version=getattr(link, "version", 1) or 1,
     )
 
 
-async def _ensure_owner(project: Project, user: User) -> None:
-    if str(project.owner_id) != str(user.id) and user.role != "admin":
-        raise ForbiddenError("You do not have access to this project")
+async def get_project_for_user(
+    db: AsyncSession, user: User, project_id: str, *, min_role: str = "viewer"
+) -> Project:
+    """Membership-gated project fetch. Defaults to viewer access — callers
+    that need write access pass `min_role='editor'` (or 'owner' for member
+    management / project deletion)."""
+    from app.services.members_service import require_membership
 
-
-async def _load_project(db: AsyncSession, project_id: str) -> Project:
+    await require_membership(db, user, project_id, min_role=min_role)
     p = (
         await db.execute(select(Project).where(Project.id == project_id))
     ).scalar_one_or_none()
@@ -86,19 +91,14 @@ async def _load_project(db: AsyncSession, project_id: str) -> Project:
     return p
 
 
-async def get_project_for_user(
-    db: AsyncSession, user: User, project_id: str
-) -> Project:
-    p = await _load_project(db, project_id)
-    await _ensure_owner(p, user)
-    return p
-
-
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
 async def create_project(
     db: AsyncSession, user: User, req: ProjectCreateRequest
 ) -> ProjectListItem:
+    from app.models.project_member import ProjectMember
+    from app.services import activity_service
+
     project = Project(
         owner_id=str(user.id),
         name=req.name,
@@ -107,8 +107,29 @@ async def create_project(
         tags=req.tags or [],
     )
     db.add(project)
+    await db.flush()  # need project.id to attach the membership row
+
+    # Creator becomes owner via membership (canonical source of truth)
+    db.add(
+        ProjectMember(
+            project_id=str(project.id),
+            user_id=str(user.id),
+            role="owner",
+            invited_by=str(user.id),
+        )
+    )
     await db.commit()
     await db.refresh(project)
+
+    await activity_service.record(
+        db,
+        project_id=str(project.id),
+        actor_id=str(user.id),
+        action="project_created",
+        entity_type="project",
+        entity_id=str(project.id),
+        summary=f"Created project '{project.name}'",
+    )
     return _to_list_item(project, 0, 0)
 
 
@@ -118,13 +139,33 @@ async def list_projects(
     status: Optional[str] = None,
     search: Optional[str] = None,
     sort: str = "updated_desc",
+    limit: Optional[int] = None,
+    offset: int = 0,
+    membership_filter: Optional[str] = None,  # 'owned' | 'shared' | None=all
 ) -> list[ProjectListItem]:
-    stmt = select(Project).where(Project.owner_id == user.id)
+    from app.models.project_member import ProjectMember
+
+    member_subquery = select(ProjectMember.project_id).where(
+        ProjectMember.user_id == user.id
+    )
+    if membership_filter == "owned":
+        member_subquery = member_subquery.where(ProjectMember.role == "owner")
+    base = select(Project).where(Project.id.in_(member_subquery))
+    if membership_filter == "shared":
+        # Member but NOT owner — i.e. someone else gave you access
+        base = base.where(
+            Project.id.in_(
+                select(ProjectMember.project_id).where(
+                    ProjectMember.user_id == user.id,
+                    ProjectMember.role.in_(["editor", "viewer"]),
+                )
+            )
+        )
     if status:
-        stmt = stmt.where(Project.status == status)
+        base = base.where(Project.status == status)
     if search:
         like = f"%{search}%"
-        stmt = stmt.where(
+        base = base.where(
             (Project.name.ilike(like)) | (Project.description.ilike(like))
         )
 
@@ -136,7 +177,11 @@ async def list_projects(
         "name_asc": Project.name.asc(),
         "name_desc": Project.name.desc(),
     }
-    stmt = stmt.order_by(sort_map.get(sort, Project.updated_at.desc()))
+    stmt = base.order_by(sort_map.get(sort, Project.updated_at.desc()))
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit:
+        stmt = stmt.limit(limit)
 
     projects = (await db.execute(stmt)).scalars().all()
     if not projects:
@@ -167,6 +212,40 @@ async def list_projects(
         _to_list_item(p, doc_map.get(str(p.id), 0), pres_map.get(str(p.id), 0))
         for p in projects
     ]
+
+
+async def count_projects(
+    db: AsyncSession,
+    user: User,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    membership_filter: Optional[str] = None,
+) -> int:
+    from app.models.project_member import ProjectMember
+
+    member_subquery = select(ProjectMember.project_id).where(
+        ProjectMember.user_id == user.id
+    )
+    if membership_filter == "owned":
+        member_subquery = member_subquery.where(ProjectMember.role == "owner")
+    stmt = select(func.count(Project.id)).where(Project.id.in_(member_subquery))
+    if membership_filter == "shared":
+        stmt = stmt.where(
+            Project.id.in_(
+                select(ProjectMember.project_id).where(
+                    ProjectMember.user_id == user.id,
+                    ProjectMember.role.in_(["editor", "viewer"]),
+                )
+            )
+        )
+    if status:
+        stmt = stmt.where(Project.status == status)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            (Project.name.ilike(like)) | (Project.description.ilike(like))
+        )
+    return (await db.execute(stmt)).scalar_one()
 
 
 async def get_project_detail(
@@ -213,19 +292,38 @@ async def get_project_detail(
 async def update_project(
     db: AsyncSession, user: User, project_id: str, req: ProjectUpdateRequest
 ) -> ProjectListItem:
-    project = await get_project_for_user(db, user, project_id)
+    from app.services import activity_service
 
-    if req.name is not None:
+    project = await get_project_for_user(db, user, project_id, min_role="editor")
+
+    changed: list[str] = []
+    if req.name is not None and req.name != project.name:
         project.name = req.name
-    if req.description is not None:
+        changed.append("name")
+    if req.description is not None and req.description != project.description:
         project.description = req.description
-    if req.tags is not None:
+        changed.append("description")
+    if req.tags is not None and (req.tags or []) != (project.tags or []):
         project.tags = req.tags
-    if req.status is not None:
+        changed.append("tags")
+    if req.status is not None and req.status != project.status:
         project.status = req.status
+        changed.append("status")
 
     await db.commit()
     await db.refresh(project)
+
+    if changed:
+        await activity_service.record(
+            db,
+            project_id=str(project.id),
+            actor_id=str(user.id),
+            action="project_updated",
+            entity_type="project",
+            entity_id=str(project.id),
+            summary=f"Updated {', '.join(changed)}",
+            metadata={"fields": changed, "status": project.status},
+        )
 
     doc_count = (
         await db.execute(
@@ -246,7 +344,10 @@ async def update_project(
 
 
 async def delete_project(db: AsyncSession, user: User, project_id: str) -> None:
-    project = await get_project_for_user(db, user, project_id)
+    from app.models.project_activity import ProjectActivity
+    from app.models.project_member import ProjectMember
+
+    project = await get_project_for_user(db, user, project_id, min_role="owner")
 
     # Delete child rows explicitly (no CASCADE configured at FK level)
     await db.execute(
@@ -257,6 +358,16 @@ async def delete_project(db: AsyncSession, user: User, project_id: str) -> None:
     await db.execute(
         ProjectDocument.__table__.delete().where(
             ProjectDocument.project_id == project_id
+        )
+    )
+    await db.execute(
+        ProjectActivity.__table__.delete().where(
+            ProjectActivity.project_id == project_id
+        )
+    )
+    await db.execute(
+        ProjectMember.__table__.delete().where(
+            ProjectMember.project_id == project_id
         )
     )
     await db.delete(project)
