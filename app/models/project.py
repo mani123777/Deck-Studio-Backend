@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import String, JSON, ForeignKey, Text, Integer
+from sqlalchemy import Integer, JSON, String, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedModel
@@ -42,7 +42,13 @@ class ProjectDocument(TimestampedModel):
 
 
 class ProjectPresentationLink(TimestampedModel):
-    """Links a generated Presentation to a Project with role + provenance metadata."""
+    """Links a generated Presentation to a Project with role + provenance metadata.
+
+    `prior_link_id` chains regenerations: each regen of a deck creates a NEW
+    link pointing back at the link it was regenerated from, so history is
+    preserved (the prior deck stays accessible). `version` is 1 for the
+    original generation, +1 per regen step.
+    """
     __tablename__ = "project_presentation_links"
 
     project_id: Mapped[str] = mapped_column(
@@ -57,3 +63,10 @@ class ProjectPresentationLink(TimestampedModel):
     generated_by: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id"), nullable=False
     )
+    prior_link_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("project_presentation_links.id"),
+        nullable=True,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

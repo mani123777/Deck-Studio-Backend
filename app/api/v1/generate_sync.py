@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import re
+import socket
 import tempfile
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -16,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai import gemini_client
 from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, render
 from app.api.dependencies import get_current_user
+from app.config import settings
 from app.core.database import get_db
 from app.extractors.extractor_factory import extract_content
 from app.models.template import Template
@@ -26,6 +30,128 @@ from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 logger = get_logger(__name__)
+
+
+_ALLOWED_URL_SCHEMES = {"http", "https"}
+_ALLOWED_URL_PORTS = {80, 443, None}  # None = scheme default
+
+
+def _resolve_and_validate_host(url: str) -> None:
+    """Resolve hostname → IP and reject if it points at a non-public address.
+
+    Guards against SSRF — without this, a user could submit
+    http://169.254.169.254/ (AWS metadata) or http://localhost:6379/ and
+    the resulting body would land in the AI-generated slides.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise HTTPException(status_code=400, detail="URL must use http or https")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="URL is missing a hostname")
+    if parsed.port not in _ALLOWED_URL_PORTS:
+        raise HTTPException(
+            status_code=400, detail="URL port not allowed (only 80/443)"
+        )
+
+    if settings.URL_FETCH_ALLOW_PRIVATE:
+        return
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not resolve URL host: {exc}"
+        ) from exc
+
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="URL host resolves to a non-public address",
+            )
+
+
+async def _fetch_with_size_cap(url: str) -> tuple[str, str]:
+    """Fetch a URL with manual redirects (each redirect re-validated for SSRF)
+    and a streaming byte cap. Returns (final_url, body_text)."""
+    max_bytes = settings.MAX_URL_BYTES_MB * 1024 * 1024
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; WACDeckStudio/1.0)",
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+    }
+
+    current_url = url
+    async with httpx.AsyncClient(
+        timeout=settings.URL_FETCH_TIMEOUT_SECONDS,
+        follow_redirects=False,
+        headers=headers,
+    ) as client:
+        for hop in range(settings.URL_FETCH_MAX_REDIRECTS + 1):
+            _resolve_and_validate_host(current_url)
+            try:
+                async with client.stream("GET", current_url) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Redirect without Location header",
+                            )
+                        current_url = urljoin(current_url, loc)
+                        continue
+
+                    if resp.status_code >= 400:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Could not fetch URL: HTTP {resp.status_code}",
+                        )
+
+                    ctype = resp.headers.get("content-type", "")
+                    if "html" not in ctype and "text" not in ctype:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"URL returned unsupported content-type '{ctype}'.",
+                        )
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"URL response exceeds "
+                                    f"{settings.MAX_URL_BYTES_MB} MB cap"
+                                ),
+                            )
+                        chunks.append(chunk)
+
+                    encoding = resp.charset_encoding or "utf-8"
+                    try:
+                        body = b"".join(chunks).decode(encoding, errors="replace")
+                    except LookupError:
+                        body = b"".join(chunks).decode("utf-8", errors="replace")
+                    return current_url, body
+
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Could not fetch URL: {exc}"
+                ) from exc
+
+        raise HTTPException(status_code=400, detail="Too many redirects")
 
 
 async def _extract_file_text(file: UploadFile) -> str:
@@ -43,52 +169,29 @@ async def _extract_file_text(file: UploadFile) -> str:
 
 
 async def _extract_url_text(url: str) -> tuple[str, str]:
-    """Fetch a URL and return (title, readable_text). Raises HTTPException on failure."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=400, detail="URL must use http or https")
-    if not parsed.netloc:
-        raise HTTPException(status_code=400, detail="URL is malformed")
+    """Fetch a URL and return (title, readable_text). Raises HTTPException on failure.
+
+    SSRF-hardened via `_resolve_and_validate_host` re-applied at every redirect
+    hop, with a streamed byte cap to bound memory.
+    """
+    _final_url, body = await _fetch_with_size_cap(url)
 
     try:
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; WACDeckStudio/1.0)",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        ) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Could not fetch URL: {exc}"
-        ) from exc
-
-    ctype = resp.headers.get("content-type", "")
-    if "html" not in ctype and "text" not in ctype:
-        raise HTTPException(
-            status_code=400,
-            detail=f"URL returned unsupported content-type '{ctype}'.",
-        )
-
-    try:
-        doc = lxml_html.fromstring(resp.text)
+        doc = lxml_html.fromstring(body)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse HTML: {exc}") from exc
 
-    # Strip noisy elements
     for tag in doc.xpath(
         "//script | //style | //noscript | //nav | //footer | //header"
         " | //aside | //form | //iframe | //svg"
     ):
-        tag.getparent().remove(tag) if tag.getparent() is not None else None
+        parent = tag.getparent()
+        if parent is not None:
+            parent.remove(tag)
 
     title_el = doc.find(".//title")
     title = (title_el.text_content().strip() if title_el is not None else "") or url
 
-    # Prefer <article> / <main>; fall back to <body>
     candidates = doc.xpath("//article") or doc.xpath("//main") or doc.xpath("//body")
     root = candidates[0] if candidates else doc
     text = root.text_content()

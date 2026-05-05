@@ -12,6 +12,7 @@ from app.ai.gemini_client import generate_json
 from app.core.exceptions import GeminiError, NotFoundError, ValidationError
 from app.models.presentation import Presentation
 from app.models.project import Project, ProjectDocument, ProjectPresentationLink
+from app.models.role_prompt import RolePromptProfile
 from app.models.template import Template
 from app.models.theme import Theme
 from app.models.user import User
@@ -25,7 +26,11 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
+
+# Templates over this slide threshold get chunked into multiple Gemini calls
+# so we don't blow the 4096-token output ceiling on a single generation.
+SLIDES_PER_CHUNK = 6
 
 _PLACEHOLDER_RE = re.compile(r"\[PLACEHOLDER[^\]]*\]", re.IGNORECASE)
 _TEXT_BLOCK_TYPES = {
@@ -33,7 +38,10 @@ _TEXT_BLOCK_TYPES = {
     "body", "quote", "stat", "stats", "swot", "persona", "label",
 }
 
-ROLE_PROFILES: dict[str, dict[str, str]] = {
+# Hardcoded defaults — seeded into `role_prompt_profiles` on first startup.
+# At runtime, the service reads from the DB (see `_load_profile`) so admins
+# can override `audience`/`focus`/`prompt_template` without redeploying.
+DEFAULT_ROLE_PROFILES: dict[str, dict[str, str]] = {
     "developer": {
         "audience": "Engineering / development team",
         "focus": (
@@ -75,6 +83,79 @@ ROLE_PROFILES: dict[str, dict[str, str]] = {
         ),
     },
 }
+
+
+# Backward-compat alias. Existing call sites read via _load_profile/_load_all.
+ROLE_PROFILES = DEFAULT_ROLE_PROFILES
+
+
+async def seed_role_profiles(db: AsyncSession) -> None:
+    """Insert default profile rows for any role that doesn't yet have one.
+
+    Existing rows are NEVER overwritten — admin edits stick across deploys.
+    """
+    existing = (
+        await db.execute(select(RolePromptProfile.role))
+    ).scalars().all()
+    existing_set = set(existing)
+    inserted = 0
+    for role, p in DEFAULT_ROLE_PROFILES.items():
+        if role in existing_set:
+            continue
+        db.add(
+            RolePromptProfile(
+                role=role,
+                audience=p["audience"],
+                focus=p["focus"],
+                prompt_template=None,
+            )
+        )
+        inserted += 1
+    if inserted:
+        await db.commit()
+        logger.info(f"Seeded {inserted} role prompt profile(s)")
+
+
+async def _load_profile(db: AsyncSession, role: str) -> dict[str, str]:
+    """Load a role profile from the DB; fall back to hardcoded defaults if
+    the row hasn't been seeded yet (e.g. first request after a fresh install).
+    """
+    row = (
+        await db.execute(
+            select(RolePromptProfile).where(RolePromptProfile.role == role)
+        )
+    ).scalar_one_or_none()
+    if row:
+        return {
+            "audience": row.audience,
+            "focus": row.focus,
+            "prompt_template": row.prompt_template or "",
+        }
+    fallback = DEFAULT_ROLE_PROFILES.get(role)
+    if not fallback:
+        raise ValidationError(f"Unsupported role '{role}'")
+    return {**fallback, "prompt_template": ""}
+
+
+async def _load_all_profiles(db: AsyncSession) -> list[dict[str, str]]:
+    rows = (
+        await db.execute(
+            select(RolePromptProfile).order_by(RolePromptProfile.role)
+        )
+    ).scalars().all()
+    if rows:
+        return [
+            {
+                "role": r.role,
+                "audience": r.audience,
+                "focus": r.focus,
+            }
+            for r in rows
+        ]
+    return [
+        {"role": role, "audience": p["audience"], "focus": p["focus"]}
+        for role, p in DEFAULT_ROLE_PROFILES.items()
+    ]
 
 
 def _block_has_placeholder(block: dict) -> bool:
@@ -136,8 +217,18 @@ def _build_prompt(
     template: Template,
     corpus: str,
     slots: list[dict[str, Any]],
+    chunk_label: str | None = None,
+    profile: dict[str, str] | None = None,
 ) -> str:
-    profile = ROLE_PROFILES[role]
+    if profile is None:
+        profile = DEFAULT_ROLE_PROFILES[role]
+    chunk_note = (
+        f"\nNOTE: You are rewriting {chunk_label}. Stay consistent with the "
+        f"overall narrative — assume earlier and later slides exist and "
+        f"will be filled in separately.\n"
+        if chunk_label
+        else ""
+    )
     return f"""You are generating a {role.upper()} role-specific presentation from a project's source documents.
 
 PROJECT
@@ -150,7 +241,7 @@ Editorial focus: {profile['focus']}
 
 TEMPLATE: {template.name}
 Template description: {template.description or ''}
-
+{chunk_note}
 SOURCE DOCUMENTS (extracted text):
 {corpus or '(no extracted text available)'}
 
@@ -181,6 +272,69 @@ text. Every input id must appear in the output. Example:
 {{"replacements": {{"s1-title": "...", "s1-subtitle": "..."}}}}
 
 Return ONLY valid JSON. No markdown fences, no commentary."""
+
+
+async def _generate_replacements_chunked(
+    role: RoleType,
+    project: Project,
+    template: Template,
+    corpus: str,
+    slides: list[dict[str, Any]],
+    slots: list[dict[str, Any]],
+    profile: dict[str, str],
+) -> dict[str, Any]:
+    """Group slots by slide and chunk into Gemini calls of ~SLIDES_PER_CHUNK
+    slides each. Each call shares the same project/role/corpus context so the
+    deck stays coherent. Replacements from all calls are merged."""
+    slide_count = len(slides)
+    if slide_count <= SLIDES_PER_CHUNK:
+        prompt = _build_prompt(role, project, template, corpus, slots, profile=profile)
+        try:
+            ai_result = await generate_json(prompt)
+        except GeminiError:
+            raise
+        except Exception as exc:
+            raise GeminiError(f"Role generation failed: {exc}") from exc
+        replacements = (
+            ai_result.get("replacements", {}) if isinstance(ai_result, dict) else {}
+        )
+        return replacements if isinstance(replacements, dict) else {}
+
+    # Group slots by slide_order so slides aren't split across chunks
+    by_slide: dict[int, list[dict[str, Any]]] = {}
+    for slot in slots:
+        by_slide.setdefault(slot["slide_order"], []).append(slot)
+    ordered_slides = sorted(by_slide.keys())
+
+    merged: dict[str, Any] = {}
+    for chunk_start in range(0, len(ordered_slides), SLIDES_PER_CHUNK):
+        chunk_orders = ordered_slides[chunk_start : chunk_start + SLIDES_PER_CHUNK]
+        chunk_slots: list[dict[str, Any]] = []
+        for o in chunk_orders:
+            chunk_slots.extend(by_slide[o])
+        if not chunk_slots:
+            continue
+        chunk_label = (
+            f"slides {chunk_orders[0]}–{chunk_orders[-1]} of {slide_count}"
+        )
+        prompt = _build_prompt(
+            role, project, template, corpus, chunk_slots,
+            chunk_label=chunk_label, profile=profile,
+        )
+        try:
+            ai_result = await generate_json(prompt)
+        except GeminiError:
+            raise
+        except Exception as exc:
+            raise GeminiError(
+                f"Role generation failed on {chunk_label}: {exc}"
+            ) from exc
+        chunk_replacements = (
+            ai_result.get("replacements", {}) if isinstance(ai_result, dict) else {}
+        )
+        if isinstance(chunk_replacements, dict):
+            merged.update(chunk_replacements)
+    return merged
 
 
 def _apply_replacements(
@@ -261,10 +415,9 @@ async def generate_role_presentation(
     project_id: str,
     req: GenerateFromProjectRequest,
 ) -> ProjectPresentationItem:
-    project = await get_project_for_user(db, user, project_id)
+    project = await get_project_for_user(db, user, project_id, min_role="editor")
 
-    if req.role not in ROLE_PROFILES:
-        raise ValidationError(f"Unsupported role '{req.role}'")
+    profile = await _load_profile(db, req.role)
 
     documents = await _resolve_documents(db, project_id, req.document_ids)
     template, theme = await _resolve_template_and_theme(db, req.template_id, req.theme_id)
@@ -279,19 +432,9 @@ async def generate_role_presentation(
     corpus = _build_corpus(documents)
 
     if slots:
-        prompt = _build_prompt(req.role, project, template, corpus, slots)
-        try:
-            ai_result = await generate_json(prompt)
-        except GeminiError:
-            raise
-        except Exception as exc:
-            raise GeminiError(f"Role generation failed: {exc}") from exc
-
-        replacements = (
-            ai_result.get("replacements", {}) if isinstance(ai_result, dict) else {}
+        replacements = await _generate_replacements_chunked(
+            req.role, project, template, corpus, slides, slots, profile,
         )
-        if not isinstance(replacements, dict):
-            replacements = {}
         _apply_replacements(slides, replacements)
 
     title = (
@@ -325,6 +468,22 @@ async def generate_role_presentation(
     await db.refresh(link)
     await db.refresh(presentation)
 
+    from app.services import activity_service
+    await activity_service.record(
+        db,
+        project_id=str(project.id),
+        actor_id=str(user.id),
+        action="presentation_generated",
+        entity_type="presentation",
+        entity_id=str(presentation.id),
+        summary=f"Generated {req.role.upper()} deck '{presentation.title}'",
+        metadata={
+            "role": req.role,
+            "slide_count": len(presentation.slides) if presentation.slides else 0,
+            "source_document_count": len(documents),
+        },
+    )
+
     return ProjectPresentationItem(
         id=str(link.id),
         project_id=str(link.project_id),
@@ -339,8 +498,144 @@ async def generate_role_presentation(
     )
 
 
-async def list_supported_roles() -> list[dict[str, str]]:
-    return [
-        {"role": role, "audience": p["audience"], "focus": p["focus"]}
-        for role, p in ROLE_PROFILES.items()
-    ]
+async def list_supported_roles(db: AsyncSession) -> list[dict[str, str]]:
+    return await _load_all_profiles(db)
+
+
+async def delete_project_presentation(
+    db: AsyncSession,
+    user: User,
+    project_id: str,
+    link_id: str,
+) -> None:
+    """Delete a project-deck: removes the link AND the underlying presentation.
+
+    Per product decision: a generated deck "belongs" to the project, so
+    deleting from the project view should not leave orphans in /decks.
+    """
+    from app.models.presentation import Presentation
+    from app.services import activity_service
+
+    project = await get_project_for_user(db, user, project_id, min_role="editor")
+
+    link = (
+        await db.execute(
+            select(ProjectPresentationLink).where(
+                ProjectPresentationLink.id == link_id,
+                ProjectPresentationLink.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not link:
+        raise NotFoundError(f"Link {link_id} not found")
+
+    presentation_id = str(link.presentation_id)
+
+    # Detach any newer regenerations that point at this link so we don't
+    # leave dangling FKs.
+    await db.execute(
+        ProjectPresentationLink.__table__.update()
+        .where(ProjectPresentationLink.prior_link_id == link.id)
+        .values(prior_link_id=None)
+    )
+
+    title_for_log = ""
+    presentation = (
+        await db.execute(
+            select(Presentation).where(Presentation.id == presentation_id)
+        )
+    ).scalar_one_or_none()
+    if presentation:
+        title_for_log = presentation.title
+
+    # Delete the link first so the FK from project_presentation_links →
+    # presentations releases before we drop the presentation row.
+    await db.delete(link)
+    await db.flush()
+    if presentation:
+        await db.delete(presentation)
+    await db.commit()
+
+    await activity_service.record(
+        db,
+        project_id=str(project.id),
+        actor_id=str(user.id),
+        action="presentation_deleted",
+        entity_type="presentation",
+        entity_id=presentation_id,
+        summary=f"Deleted deck '{title_for_log}'" if title_for_log else "Deleted deck",
+    )
+
+
+async def regenerate_project_presentation(
+    db: AsyncSession,
+    user: User,
+    project_id: str,
+    link_id: str,
+    overrides: dict,
+) -> ProjectPresentationItem:
+    """Regenerate a deck — keeps history by creating a NEW link + presentation
+    that point back at the prior link via `prior_link_id`. The prior deck is
+    untouched. Version is bumped by one."""
+    project = await get_project_for_user(db, user, project_id, min_role="editor")
+
+    prior = (
+        await db.execute(
+            select(ProjectPresentationLink).where(
+                ProjectPresentationLink.id == link_id,
+                ProjectPresentationLink.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not prior:
+        raise NotFoundError(f"Link {link_id} not found")
+
+    # Resolve effective inputs: overrides win, else fall back to prior link.
+    role = overrides.get("role") or prior.role
+    document_ids = overrides.get("document_ids") or list(prior.source_document_ids or [])
+    template_id = overrides.get("template_id")
+    theme_id = overrides.get("theme_id")
+    title_override = overrides.get("title")
+
+    req = GenerateFromProjectRequest(
+        role=role,
+        document_ids=document_ids,
+        template_id=template_id,
+        theme_id=theme_id,
+        title=title_override,
+    )
+
+    item = await generate_role_presentation(db, user, project_id, req)
+
+    # Wire history: refetch the new link, set prior_link_id + bump version.
+    new_link = (
+        await db.execute(
+            select(ProjectPresentationLink).where(
+                ProjectPresentationLink.id == item.id
+            )
+        )
+    ).scalar_one()
+    new_link.prior_link_id = str(prior.id)
+    new_link.version = (getattr(prior, "version", 1) or 1) + 1
+    await db.commit()
+    await db.refresh(new_link)
+
+    from app.services import activity_service
+    await activity_service.record(
+        db,
+        project_id=str(project.id),
+        actor_id=str(user.id),
+        action="presentation_regenerated",
+        entity_type="presentation",
+        entity_id=str(new_link.presentation_id),
+        summary=f"Regenerated {role.upper()} deck (v{new_link.version})",
+        metadata={
+            "prior_link_id": str(prior.id),
+            "version": new_link.version,
+            "role": role,
+        },
+    )
+
+    item.prior_link_id = str(prior.id)
+    item.version = new_link.version
+    return item

@@ -30,6 +30,16 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Seed role prompt profiles (idempotent — admin overrides preserved).
+    from app.core.database import _session_factory
+    from app.services.role_generation_service import seed_role_profiles
+    if _session_factory is not None:
+        async with _session_factory() as db:
+            try:
+                await seed_role_profiles(db)
+            except Exception as exc:
+                logger.warning(f"Role profile seeding skipped: {exc}")
+
     from app.ai.gemini_client import init_gemini
     init_gemini()
     logger.info("Gemini initialized")

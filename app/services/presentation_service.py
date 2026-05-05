@@ -223,5 +223,14 @@ async def delete_presentation(db: AsyncSession, user: User, presentation_id: str
         raise NotFoundError(f"Presentation {presentation_id} not found")
     if p.user_id and str(p.user_id) != str(user.id) and user.role != "admin":
         raise ForbiddenError()
+
+    # Cascade: drop any project-presentation links pointing at this deck so we
+    # don't leave orphaned link rows that would 404 from the project detail view.
+    from app.models.project import ProjectPresentationLink
+    await db.execute(
+        ProjectPresentationLink.__table__.delete().where(
+            ProjectPresentationLink.presentation_id == presentation_id
+        )
+    )
     await db.delete(p)
     await db.commit()
