@@ -6,6 +6,10 @@ from app.models.presentation import Presentation
 from app.models.generation_job import GenerationJob
 from app.models.export_job import ExportJob
 from app.models.project import Project, ProjectDocument, ProjectPresentationLink
+from app.models.project_activity import ProjectActivity
+from app.models.project_member import ProjectMember
+from app.models.role_prompt import RolePromptProfile
+from app.models.template_slide import TemplateSlide
 
 ALL_MODELS = [
     User,
@@ -18,4 +22,8 @@ ALL_MODELS = [
     Project,
     ProjectDocument,
     ProjectPresentationLink,
+    ProjectActivity,
+    ProjectMember,
+    RolePromptProfile,
+    TemplateSlide,
 ]

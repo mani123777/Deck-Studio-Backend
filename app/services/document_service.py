@@ -10,10 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.storage import BASE_DIR
 from app.extractors.extractor_factory import extract_content
-from app.models.project import Project, ProjectDocument
+from app.models.project import ProjectDocument
 from app.models.user import User
 from app.schemas.project import (
     DocumentDetail,
@@ -115,7 +115,7 @@ async def upload_document(
     file: UploadFile,
     tags: Optional[list[str]] = None,
 ) -> DocumentDetail:
-    project = await get_project_for_user(db, user, project_id)
+    project = await get_project_for_user(db, user, project_id, min_role="editor")
 
     original_filename = file.filename or "upload"
     fmt = _detect_format(original_filename)
@@ -151,20 +151,78 @@ async def upload_document(
     await db.commit()
     await db.refresh(doc)
 
-    # Synchronous extraction (offloaded to a thread) so the doc is immediately
-    # usable for generation. Failures are recorded but don't fail the upload.
-    try:
-        text = await _extract_async(dest)
-        doc.extracted_text = text
-        doc.extraction_status = "complete"
-    except Exception as exc:
-        logger.warning(f"Extraction failed for {dest}: {exc}")
-        doc.extraction_status = "failed"
-        doc.extraction_error = str(exc)
+    from app.services import activity_service
+    await activity_service.record(
+        db,
+        project_id=str(doc.project_id),
+        actor_id=str(user.id),
+        action="document_uploaded",
+        entity_type="document",
+        entity_id=str(doc.id),
+        summary=f"Uploaded {original_filename}",
+        metadata={"format": fmt, "size_bytes": size, "version": next_version},
+    )
 
-    await db.commit()
-    await db.refresh(doc)
+    # Try to dispatch extraction to Celery so large PDFs don't hold the request.
+    # If the worker/broker is unreachable AND EXTRACTION_SYNC_FALLBACK is on,
+    # fall back to inline extraction so dev workflow stays unblocked.
+    dispatched = await _dispatch_extraction(doc.id)
+    if not dispatched:
+        try:
+            text = await _extract_async(dest)
+            doc.extracted_text = text
+            doc.extraction_status = "complete"
+            await db.commit()
+            await db.refresh(doc)
+            await activity_service.record(
+                db,
+                project_id=str(doc.project_id),
+                actor_id=str(user.id),
+                action="extraction_completed",
+                entity_type="document",
+                entity_id=str(doc.id),
+                summary=f"Extracted text from {original_filename}",
+            )
+        except Exception as exc:
+            logger.warning(f"Extraction failed for {dest}: {exc}")
+            doc.extraction_status = "failed"
+            doc.extraction_error = str(exc)
+            await db.commit()
+            await db.refresh(doc)
+            await activity_service.record(
+                db,
+                project_id=str(doc.project_id),
+                actor_id=str(user.id),
+                action="extraction_failed",
+                entity_type="document",
+                entity_id=str(doc.id),
+                summary=f"Extraction failed for {original_filename}",
+                metadata={"error": str(exc)},
+            )
+
     return _to_detail(doc)
+
+
+async def _dispatch_extraction(document_id: str) -> bool:
+    """Enqueue the Celery extraction task when a worker is configured.
+
+    Returns True if dispatched (caller should NOT run inline extraction).
+    Returns False if running in sync mode (caller MUST run inline extraction).
+
+    We don't try to auto-detect a running worker — `apply_async` to a
+    reachable broker silently queues the task even if no consumer exists,
+    leaving docs stuck in "pending" forever. So `USE_EXTRACTION_WORKER`
+    must be set explicitly when a worker is deployed.
+    """
+    if not settings.USE_EXTRACTION_WORKER:
+        return False
+    try:
+        from app.tasks.extraction_tasks import extract_document_text_task
+        extract_document_text_task.delay(document_id)
+        return True
+    except Exception as exc:
+        logger.warning(f"Celery dispatch failed: {exc}; running inline as fallback")
+        return False
 
 
 async def list_documents(
@@ -205,7 +263,7 @@ async def update_document(
     document_id: str,
     req: DocumentUpdateRequest,
 ) -> DocumentDetail:
-    await get_project_for_user(db, user, project_id)
+    await get_project_for_user(db, user, project_id, min_role="editor")
     doc = (
         await db.execute(
             select(ProjectDocument).where(
@@ -226,7 +284,7 @@ async def update_document(
 async def delete_document(
     db: AsyncSession, user: User, project_id: str, document_id: str
 ) -> None:
-    await get_project_for_user(db, user, project_id)
+    await get_project_for_user(db, user, project_id, min_role="editor")
     doc = (
         await db.execute(
             select(ProjectDocument).where(
@@ -243,14 +301,27 @@ async def delete_document(
     except Exception as exc:
         logger.warning(f"Failed to delete file {doc.storage_path}: {exc}")
 
+    project_id = str(doc.project_id)
+    filename = doc.original_filename
     await db.delete(doc)
     await db.commit()
+
+    from app.services import activity_service
+    await activity_service.record(
+        db,
+        project_id=project_id,
+        actor_id=str(user.id),
+        action="document_deleted",
+        entity_type="document",
+        entity_id=document_id,
+        summary=f"Deleted {filename}",
+    )
 
 
 async def retry_extraction(
     db: AsyncSession, user: User, project_id: str, document_id: str
 ) -> DocumentDetail:
-    await get_project_for_user(db, user, project_id)
+    await get_project_for_user(db, user, project_id, min_role="editor")
     doc = (
         await db.execute(
             select(ProjectDocument).where(
@@ -262,15 +333,61 @@ async def retry_extraction(
     if not doc:
         raise NotFoundError(f"Document {document_id} not found")
 
-    try:
-        text = await _extract_async(Path(doc.storage_path))
-        doc.extracted_text = text
-        doc.extraction_status = "complete"
-        doc.extraction_error = None
-    except Exception as exc:
-        doc.extraction_status = "failed"
-        doc.extraction_error = str(exc)
-
+    doc.extraction_status = "pending"
+    doc.extraction_error = None
     await db.commit()
     await db.refresh(doc)
+
+    dispatched = await _dispatch_extraction(doc.id)
+    if not dispatched:
+        try:
+            text = await _extract_async(Path(doc.storage_path))
+            doc.extracted_text = text
+            doc.extraction_status = "complete"
+            doc.extraction_error = None
+        except Exception as exc:
+            doc.extraction_status = "failed"
+            doc.extraction_error = str(exc)
+        await db.commit()
+        await db.refresh(doc)
     return _to_detail(doc)
+
+
+async def get_document_for_download(
+    db: AsyncSession, user: User, project_id: str, document_id: str
+) -> ProjectDocument:
+    """Verify ownership and return the document row for FileResponse."""
+    await get_project_for_user(db, user, project_id)
+    doc = (
+        await db.execute(
+            select(ProjectDocument).where(
+                ProjectDocument.id == document_id,
+                ProjectDocument.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not doc:
+        raise NotFoundError(f"Document {document_id} not found")
+    return doc
+
+
+async def get_extraction_status(
+    db: AsyncSession, user: User, project_id: str, document_id: str
+) -> dict:
+    """Lightweight poll endpoint — returns just status/error without payload."""
+    await get_project_for_user(db, user, project_id)
+    doc = (
+        await db.execute(
+            select(ProjectDocument).where(
+                ProjectDocument.id == document_id,
+                ProjectDocument.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not doc:
+        raise NotFoundError(f"Document {document_id} not found")
+    return {
+        "id": str(doc.id),
+        "extraction_status": doc.extraction_status,
+        "extraction_error": doc.extraction_error,
+    }

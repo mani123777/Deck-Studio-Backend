@@ -13,6 +13,18 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     MAX_UPLOAD_SIZE_MB: int = 10
+    # URL fetch safety (used by /generate/sync `url` field)
+    MAX_URL_BYTES_MB: int = 5
+    URL_FETCH_TIMEOUT_SECONDS: float = 20.0
+    URL_FETCH_MAX_REDIRECTS: int = 5
+    # When True, skip private/loopback/link-local IP rejection. Dev/test only.
+    URL_FETCH_ALLOW_PRIVATE: bool = False
+    # When False (default), document extraction runs synchronously in the
+    # request thread (dev/no-worker). When True, extraction is dispatched
+    # to a Celery worker — the worker MUST be running, since `apply_async`
+    # to a reachable broker without a worker would leave docs stuck in
+    # "pending" forever.
+    USE_EXTRACTION_WORKER: bool = False
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
