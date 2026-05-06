@@ -22,7 +22,8 @@ async def init_db() -> None:
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _apply_inline_migrations(conn)
+        if not url.startswith("sqlite"):
+            await _apply_inline_migrations(conn)
 
 
 async def _apply_inline_migrations(conn) -> None:
