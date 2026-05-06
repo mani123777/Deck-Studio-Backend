@@ -16,7 +16,9 @@ _session_factory = None
 
 async def init_db() -> None:
     global _engine, _session_factory
-    _engine = create_async_engine(settings.MYSQL_URL, echo=False, pool_pre_ping=True)
+    url = settings.DATABASE_URL
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    _engine = create_async_engine(url, echo=False, connect_args=connect_args)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
