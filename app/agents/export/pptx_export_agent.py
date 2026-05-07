@@ -125,6 +125,16 @@ class PptxExportAgent:
         for slide_data in sorted(presentation.slides or [], key=lambda s: s.get("order", 0)):
             pptx_slide = prs.slides.add_slide(blank_layout)
 
+            # Presenter notes — render into the slide's notes_slide so they
+            # appear in PowerPoint's notes pane and read back from
+            # python-pptx-style consumers.
+            notes_text = (slide_data.get("notes") or "").strip()
+            if notes_text:
+                try:
+                    pptx_slide.notes_slide.notes_text_frame.text = notes_text
+                except Exception:
+                    pass
+
             # Aggressively remove ALL placeholder shapes (p:sp with a p:ph child).
             # pptx_slide.placeholders only enumerates shapes the library recognises;
             # some slide-master-inherited placeholders are invisible to that API but

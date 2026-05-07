@@ -62,8 +62,45 @@ def _slide_dicts_to_schemas(slides: list) -> list[SlideSchema]:
             type=s.get("type", "content"),
             background=SlideBackgroundSchema(**bg) if bg else None,
             blocks=blocks,
+            notes=s.get("notes", "") or "",
         ))
     return result
+
+
+def _slide_to_dict(s) -> dict:
+    return {
+        "order": s.order,
+        "type": s.type,
+        "background": s.background.model_dump() if s.background else None,
+        "blocks": [
+            {
+                "id": b.id,
+                "type": b.type,
+                "content": b.content,
+                "position": b.position.model_dump(),
+                "styling": b.styling.model_dump(),
+            }
+            for b in s.blocks
+        ],
+        "notes": getattr(s, "notes", "") or "",
+    }
+
+
+def _layout_to_dict(layout) -> dict:
+    return {
+        "id": layout.id,
+        "name": layout.name,
+        "blocks": [
+            {
+                "id": b.id,
+                "type": b.type,
+                "content": b.content,
+                "position": b.position.model_dump(),
+                "styling": b.styling.model_dump(),
+            }
+            for b in layout.blocks
+        ],
+    }
 
 
 def _to_detail(p: Presentation, template_name: str = "") -> PresentationDetail:
@@ -83,6 +120,7 @@ def _to_detail(p: Presentation, template_name: str = "") -> PresentationDetail:
         updated_at=p.updated_at.isoformat() if p.updated_at else "",
         slides=slides,
         logo_url=p.logo_url or "",
+        layouts=p.layouts or [],
     )
 
 
@@ -133,6 +171,12 @@ async def update_presentation(
     if p.user_id and str(p.user_id) != str(user.id) and user.role != "admin":
         raise ForbiddenError()
 
+    # Snapshot the prior state opportunistically (debounced) before applying
+    # changes, so the user can roll back. Service handles the dedup.
+    if req.slides is not None:
+        from app.services import version_service
+        await version_service.maybe_snapshot(db, p, user)
+
     if req.title is not None:
         p.title = req.title
     if req.description is not None:
@@ -142,24 +186,9 @@ async def update_presentation(
     if req.theme_id is not None:
         p.theme_id = req.theme_id
     if req.slides is not None:
-        p.slides = [
-            {
-                "order": s.order,
-                "type": s.type,
-                "background": s.background.model_dump() if s.background else None,
-                "blocks": [
-                    {
-                        "id": b.id,
-                        "type": b.type,
-                        "content": b.content,
-                        "position": b.position.model_dump(),
-                        "styling": b.styling.model_dump(),
-                    }
-                    for b in s.blocks
-                ],
-            }
-            for s in req.slides
-        ]
+        p.slides = [_slide_to_dict(s) for s in req.slides]
+    if req.layouts is not None:
+        p.layouts = [_layout_to_dict(l) for l in req.layouts]
 
     await db.commit()
     await db.refresh(p)
@@ -179,24 +208,15 @@ async def create_presentation(
             raise NotFoundError("No templates found in database")
         template_id = str(first_template.id)
 
-    slides_data = [
-        {
-            "order": s.order,
-            "type": s.type,
-            "background": s.background.model_dump() if s.background else None,
-            "blocks": [
-                {
-                    "id": b.id,
-                    "type": b.type,
-                    "content": b.content,
-                    "position": b.position.model_dump(),
-                    "styling": b.styling.model_dump(),
-                }
-                for b in s.blocks
-            ],
-        }
-        for s in req.slides
-    ]
+    slides_data = [_slide_to_dict(s) for s in req.slides]
+
+    # If the user has a brand kit and provided no logo, default to it.
+    logo_url = req.logo_url
+    if not logo_url:
+        from app.services import brand_kit_service
+        kit = await brand_kit_service.get_kit(db, user)
+        if kit and kit.logo_url:
+            logo_url = kit.logo_url
 
     presentation = Presentation(
         user_id=str(user.id),
@@ -204,9 +224,10 @@ async def create_presentation(
         theme_id=req.theme_id,
         title=req.title,
         description=req.description,
-        logo_url=req.logo_url,
+        logo_url=logo_url,
         slides=slides_data,
         is_preview=False,
+        layouts=[],
     )
     db.add(presentation)
     await db.commit()

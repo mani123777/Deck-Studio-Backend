@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.exceptions import AuthError, ValidationError
 from app.core.security import (
@@ -13,10 +15,20 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.models.password_reset import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.schemas.auth import RegisterRequest, TokenResponse, UserPublic
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+PASSWORD_RESET_TTL_MINUTES = 60
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def register(db: AsyncSession, req: RegisterRequest) -> UserPublic:
@@ -83,6 +95,63 @@ async def revoke_refresh(db: AsyncSession, refresh_token_str: str) -> None:
     if rt:
         rt.revoked = True
         await db.commit()
+
+
+async def request_password_reset(db: AsyncSession, email: str) -> str | None:
+    """Issue a one-time reset token for the user with this email.
+
+    Returns the raw token if the user exists, else None. Callers must NOT
+    leak that distinction to the client — the endpoint always returns 200
+    to prevent email enumeration.
+    """
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if not user or not user.is_active:
+        return None
+
+    raw = secrets.token_urlsafe(32)
+    token_hash = _hash_reset_token(raw)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
+
+    # Invalidate any prior unused tokens for this user.
+    await db.execute(
+        update(PasswordResetToken)
+        .where(PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None))
+        .values(used_at=datetime.now(timezone.utc))
+    )
+    db.add(PasswordResetToken(user_id=user.id, token_hash=token_hash, expires_at=expires_at))
+    await db.commit()
+
+    # Until an email service is wired up, log the link so devs can copy it.
+    logger.info(f"Password reset requested for {email} — token: {raw}")
+    return raw
+
+
+async def confirm_password_reset(db: AsyncSession, token: str, new_password: str) -> None:
+    token_hash = _hash_reset_token(token)
+    rec = (
+        await db.execute(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash))
+    ).scalar_one_or_none()
+    if not rec:
+        raise AuthError("Invalid or expired reset token")
+    if rec.used_at is not None:
+        raise AuthError("Reset token has already been used")
+    if rec.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise AuthError("Reset token has expired")
+
+    user = (await db.execute(select(User).where(User.id == rec.user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        raise AuthError("Invalid or expired reset token")
+
+    user.hashed_password = hash_password(new_password)
+    rec.used_at = datetime.now(timezone.utc)
+
+    # Force re-login on every device by revoking all refresh tokens.
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked.is_(False))
+        .values(revoked=True)
+    )
+    await db.commit()
 
 
 def _user_to_public(user: User) -> UserPublic:

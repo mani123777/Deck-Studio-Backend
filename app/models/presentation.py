@@ -19,3 +19,6 @@ class Presentation(TimestampedModel):
     logo_url: Mapped[str] = mapped_column(String(500), default="")
     slides: Mapped[list] = mapped_column(JSON, default=list)  # list of slide dicts
     is_preview: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Layouts saved within this deck — list of {id, name, blocks[]} where blocks
+    # are placeholder-only versions of slide blocks (no user content).
+    layouts: Mapped[list] = mapped_column(JSON, default=list)

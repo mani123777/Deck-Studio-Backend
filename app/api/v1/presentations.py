@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.gemini_client import generate_json
 from app.api.dependencies import get_current_user
 from app.core.database import get_db
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.models.presentation import Presentation
 from app.models.user import User
 from app.schemas.presentation import (
     CreatePresentationRequest,
@@ -18,7 +20,8 @@ from app.schemas.presentation import (
     SlideSchema,
     UpdatePresentationRequest,
 )
-from app.services import presentation_service
+from app.services import presentation_service, version_service
+from sqlalchemy import select
 
 router = APIRouter(prefix="/presentations", tags=["presentations"])
 
@@ -114,3 +117,70 @@ Rules:
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Version history ──────────────────────────────────────────────────────────
+
+
+async def _load_owned_presentation(
+    db: AsyncSession, user: User, presentation_id: str
+) -> Presentation:
+    p = (
+        await db.execute(select(Presentation).where(Presentation.id == presentation_id))
+    ).scalar_one_or_none()
+    if not p:
+        raise NotFoundError(f"Presentation {presentation_id} not found")
+    if p.user_id and str(p.user_id) != str(user.id) and user.role != "admin":
+        raise ForbiddenError()
+    return p
+
+
+class VersionItem(BaseModel):
+    id: str
+    presentation_id: str
+    version_number: int
+    title: str
+    slide_count: int
+    theme_id: str
+    created_by: Optional[str]
+    label: str
+    created_at: str
+
+
+class CreateVersionPayload(BaseModel):
+    label: str = ""
+
+
+@router.get("/{presentation_id}/versions", response_model=list[VersionItem])
+async def list_versions(
+    presentation_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[VersionItem]:
+    await _load_owned_presentation(db, current_user, presentation_id)
+    versions = await version_service.list_versions(db, presentation_id)
+    return [VersionItem(**version_service.to_dict(v)) for v in versions]
+
+
+@router.post("/{presentation_id}/versions", response_model=VersionItem, status_code=201)
+async def create_version(
+    presentation_id: str,
+    payload: CreateVersionPayload,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> VersionItem:
+    p = await _load_owned_presentation(db, current_user, presentation_id)
+    v = await version_service.force_snapshot(db, p, current_user, label=payload.label)
+    return VersionItem(**version_service.to_dict(v))
+
+
+@router.post("/{presentation_id}/versions/{version_id}/restore", response_model=PresentationDetail)
+async def restore_version(
+    presentation_id: str,
+    version_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PresentationDetail:
+    p = await _load_owned_presentation(db, current_user, presentation_id)
+    await version_service.restore_version(db, p, current_user, version_id)
+    return await presentation_service.get_presentation(db, current_user, presentation_id)

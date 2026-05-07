@@ -39,6 +39,13 @@ class SlideSchema(BaseModel):
     type: str
     background: Optional[SlideBackgroundSchema] = None
     blocks: list[BlockSchema] = []
+    notes: str = ""
+
+
+class DeckLayoutSchema(BaseModel):
+    id: str
+    name: str
+    blocks: list[BlockSchema] = []
 
 
 class PresentationListItem(BaseModel):
@@ -59,6 +66,7 @@ class PresentationListItem(BaseModel):
 class PresentationDetail(PresentationListItem):
     slides: list[SlideSchema]
     logo_url: str
+    layouts: list[DeckLayoutSchema] = []
 
 
 class UpdatePresentationRequest(BaseModel):
@@ -67,6 +75,7 @@ class UpdatePresentationRequest(BaseModel):
     logo_url: Optional[str] = None
     theme_id: Optional[str] = None
     slides: Optional[list[SlideSchema]] = None
+    layouts: Optional[list[DeckLayoutSchema]] = None
 
 
 class CreatePresentationRequest(BaseModel):
