@@ -174,5 +174,67 @@ Rules:
 """)
 
 
+RESEARCH_SUMMARY_PROMPT = Template("""
+You are a research analyst synthesizing recent news articles into structured insights for a presentation.
+
+Topic: $topic
+Audience: $audience
+Style: $style
+
+Articles (numbered, with source domain and full text):
+$articles
+
+Your job is to produce a JSON research brief. STRICT rules:
+- Use ONLY facts present in the articles. If something isn't there, omit it. NEVER invent statistics, dates, or quotes.
+- When citing a fact, append article numbers in brackets, e.g. "Floods displaced 2.4M people [1][3]".
+- If articles disagree, surface the disagreement explicitly in `risks` or `key_points` (e.g. "Sources differ on casualty count: [1] reports 12, [4] reports 30").
+- If a section has no supporting material, return an empty array/string for it — do not pad.
+
+Return ONLY this JSON (no markdown fences, no commentary):
+{
+  "title": "Concise presentation title (≤10 words)",
+  "overview": "2–3 sentence neutral summary of the topic.",
+  "key_points": ["fact 1 [n]", "fact 2 [n]", ...],
+  "timeline": [
+    {"date": "ISO or human date", "event": "what happened [n]"}
+  ],
+  "statistics": [
+    {"value": "exact number from article", "label": "what it measures", "source_index": 1}
+  ],
+  "trends": ["trend 1 [n]", "trend 2 [n]"],
+  "risks": ["risk or open question [n]"],
+  "conclusion": "1–2 sentence forward-looking takeaway, grounded in the articles.",
+  "sources_used": [1, 2, 4]
+}
+""")
+
+
+TOPIC_OUTLINE_PROMPT = Template("""
+You are planning the slide order for a presentation based on a research brief.
+
+Topic: $topic
+Audience: $audience
+Style: $style
+Slide count target: $slide_count
+
+Research brief (JSON):
+$brief
+
+Return ONLY a JSON array of slide intents in display order. Each item:
+{"order": 1, "type": "title|agenda|content|stats|timeline|quote|closing|sources",
+ "title": "slide title (≤8 words)",
+ "key_points": ["talking point 1", "talking point 2"]}
+
+Rules:
+- First slide must be type "title".
+- Second slide must be type "agenda" listing the major sections.
+- Last slide must be type "sources" listing the article URLs that informed the deck.
+- Use type "stats" for slides primarily about numeric data (values from research.statistics).
+- Use type "timeline" for chronological slides if research.timeline has entries.
+- Use type "content" for narrative sections.
+- Length: exactly $slide_count items. Pad or condense as needed but never invent material.
+""")
+
+
 def render(template: Template, **kwargs) -> str:
     return template.substitute(**kwargs)
