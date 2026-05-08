@@ -46,6 +46,7 @@ class PdfExportAgent:
                 "order": slide.get("order", 0),
                 "type": slide.get("type", "content"),
                 "blocks": blocks_data,
+                "notes": (slide.get("notes") or "").strip(),
             })
 
         colors = theme.colors  # dict

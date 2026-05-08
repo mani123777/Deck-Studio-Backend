@@ -119,6 +119,15 @@ async def _apply_inline_migrations(conn) -> None:
             )
         )
 
+    # P1 (presentation): per-deck saved layouts. Existing decks get an empty list.
+    if not await _column_exists("presentations", "layouts"):
+        await conn.execute(
+            text(
+                "ALTER TABLE presentations "
+                "ADD COLUMN layouts JSON NULL"
+            )
+        )
+
 
 async def close_db() -> None:
     global _engine

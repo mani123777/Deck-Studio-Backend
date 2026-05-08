@@ -207,6 +207,9 @@
         {% endif %}
 
       {% endfor %}
+      {% if slide.notes %}
+      <aside class="presenter-notes" hidden>{{ slide.notes }}</aside>
+      {% endif %}
     </div>
     {% endfor %}
   </div>

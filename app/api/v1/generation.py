@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.models.user import User
 from app.schemas.generation import GenerationJobResponse, GenerationStatusResponse
 from app.services import generation_service
@@ -15,7 +16,9 @@ router = APIRouter(prefix="/generate", tags=["generation"])
 
 
 @router.post("", response_model=GenerationJobResponse, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("20/hour")
 async def start_generation(
+    request: Request,
     template_id: str = Form(...),
     file: UploadFile = File(...),
     logo_url: Optional[str] = Form(None),

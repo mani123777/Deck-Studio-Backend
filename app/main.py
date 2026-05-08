@@ -8,11 +8,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.core.database import close_db, init_db
 from app.core.exceptions import AppError
+from app.core.rate_limit import limiter
 from app.core.storage import ensure_dirs
 from app.utils.logger import get_logger
 
@@ -72,6 +75,16 @@ def create_app() -> FastAPI:
                 )
                 return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
+    app.state.limiter = limiter
+    app.add_middleware(SlowAPIMiddleware)
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"Too many requests. Try again later. ({exc.detail})"},
+        )
+
     app.add_middleware(ErrorLoggingMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -117,13 +130,19 @@ def create_app() -> FastAPI:
     from app.api.v1.themes import router as themes_router
     from app.api.v1.share import router as share_router
     from app.api.v1.projects import router as projects_router
+    from app.api.v1.brand_kit import router as brand_kit_router
+    from app.api.v1.images import router as images_router
 
     app.include_router(auth_router, prefix=API_V1)
+    app.include_router(brand_kit_router, prefix=API_V1)
+    app.include_router(images_router, prefix=API_V1)
     app.include_router(themes_router, prefix=API_V1)
     app.include_router(templates_router, prefix=API_V1)
     app.include_router(generation_router, prefix=API_V1)
     from app.api.v1.generate_sync import router as generate_sync_router
     app.include_router(generate_sync_router, prefix=API_V1)
+    from app.api.v1.generate_stream import router as generate_stream_router
+    app.include_router(generate_stream_router, prefix=API_V1)
     app.include_router(presentations_router, prefix=API_V1)
     app.include_router(export_router, prefix=API_V1)
     app.include_router(import_router, prefix=API_V1)
@@ -143,6 +162,11 @@ def create_app() -> FastAPI:
     imports_dir = Path(__file__).resolve().parent.parent / "storage" / "imports"
     imports_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/imports", StaticFiles(directory=str(imports_dir)), name="imports")
+
+    # AI-generated images saved by /api/v1/images/generate
+    generated_dir = Path(__file__).resolve().parent.parent / "storage" / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/generated", StaticFiles(directory=str(generated_dir)), name="generated")
 
     return app
 

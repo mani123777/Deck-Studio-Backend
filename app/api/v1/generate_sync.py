@@ -11,7 +11,7 @@ from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from lxml import html as lxml_html
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, render
 from app.api.dependencies import get_current_user
 from app.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.extractors.extractor_factory import extract_content
 from app.models.template import Template
 from app.models.theme import Theme
@@ -206,11 +207,14 @@ async def _extract_url_text(url: str) -> tuple[str, str]:
 
 
 @router.post("/sync", response_model=PreviewResponse)
+@limiter.limit("20/hour")
 async def generate_sync(
+    request: Request,
     prompt: str = Form(""),
     slide_count: int = Form(10),
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
+    images: list[UploadFile] = File(default=[]),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PreviewResponse:
@@ -219,8 +223,8 @@ async def generate_sync(
     Single Gemini API call — analysis + slide content combined.
 
     Source content priority (concatenated, when present):
-      prompt + uploaded file text + URL-fetched text
-    At least one of {prompt, file, url} must be supplied.
+      prompt + uploaded file text + URL-fetched text + uploaded images (multimodal)
+    At least one of {prompt, file, url, images} must be supplied.
     """
     from app.agents.generation.preview_generator_agent import _build_outline
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
@@ -252,26 +256,55 @@ async def generate_sync(
             page_text = page_text[:50_000] + "\n...[content truncated]"
         parts.append(f"Source: {url_value}\nTitle: {title}\n\n{page_text}")
 
-    if not parts:
+    # Collect images for multimodal input — capped to keep request size sane.
+    image_payloads: list[tuple[bytes, str]] = []
+    MAX_IMAGES = 4
+    MAX_IMAGE_BYTES = 5 * 1024 * 1024
+    for img in (images or [])[:MAX_IMAGES]:
+        if not img or not img.filename:
+            continue
+        mime = (img.content_type or "image/png").lower()
+        if not mime.startswith("image/"):
+            continue
+        data = await img.read()
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image '{img.filename}' exceeds 5 MB limit.",
+            )
+        if data:
+            image_payloads.append((data, mime))
+
+    if not parts and not image_payloads:
         raise HTTPException(
             status_code=400,
-            detail="Provide a prompt, a document, or a URL.",
+            detail="Provide a prompt, a document, a URL, or at least one image.",
         )
 
-    content = "\n\n".join(parts)
-    # Keep `prompt` field non-empty so downstream prompt template formats cleanly
+    content = "\n\n".join(parts) if parts else "Use the attached image(s) as the primary source."
     if not prompt:
-        prompt = f"Create a presentation from the provided source material."
+        prompt = "Create a presentation from the provided source material."
 
-    # Single Gemini call — analyze content + generate all slide content
     combined_prompt = render(
         COMBINED_GENERATION_PROMPT,
         prompt=prompt,
         content=content,
         slide_count=slide_count,
     )
+    if image_payloads:
+        combined_prompt += (
+            "\n\nThe attached images are part of the source material. "
+            "Read any visible text, charts, or data from them and incorporate "
+            "those facts into the slide content where relevant."
+        )
+
     try:
-        result = await gemini_client.generate_json(combined_prompt)
+        if image_payloads:
+            result = await gemini_client.generate_json_multimodal(
+                combined_prompt, image_payloads
+            )
+        else:
+            result = await gemini_client.generate_json(combined_prompt)
     except Exception as exc:
         logger.error(f"Generation failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Content analysis failed: {exc}")

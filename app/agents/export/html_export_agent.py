@@ -59,6 +59,7 @@ class HtmlExportAgent:
                 "type": slide.get("type", "content"),
                 "background_css": bg_css,
                 "blocks": blocks_data,
+                "notes": (slide.get("notes") or "").strip(),
             })
 
         html_content = template.render(
