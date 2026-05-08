@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     SECRET_KEY: str = "change-me-in-production"
     GEMINI_API_KEY: str = ""
+    # Optional: when set, the topic-research feature uses Serper.dev for
+    # higher-quality news results. When empty, it falls back to a
+    # DuckDuckGo HTML scrape.
+    SERPER_API_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     MAX_UPLOAD_SIZE_MB: int = 10

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import random
 import re
 from typing import Any
 
@@ -15,17 +17,26 @@ logger = get_logger(__name__)
 
 _MODEL = "gemini-2.5-flash"
 _REST_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{_MODEL}:generateContent"
-_TIMEOUT = 30.0
+_TIMEOUT = 60.0  # research summary prompts can be 100KB+, give them room
 _IMAGE_MODEL = "gemini-2.5-flash-image"
 _IMAGE_REST_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{_IMAGE_MODEL}:generateContent"
 _IMAGE_TIMEOUT = 60.0
+
+# Status codes that indicate transient Google-side overload — worth retrying.
+_RETRYABLE_STATUSES = {500, 502, 503, 504}
+
+
+async def _sleep_with_backoff(attempt: int) -> None:
+    # Exponential backoff with jitter: ~1s, 2s, 4s, 8s, capped at 16s.
+    delay = min(16.0, (2 ** attempt) * 1.0) + random.uniform(0, 0.5)
+    await asyncio.sleep(delay)
 
 
 def init_gemini() -> None:
     logger.info("Gemini client ready (REST)")
 
 
-async def generate_json(prompt: str, retries: int = 2) -> Any:
+async def generate_json(prompt: str, retries: int = 4) -> Any:
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -41,11 +52,25 @@ async def generate_json(prompt: str, retries: int = 2) -> Any:
         for attempt in range(retries):
             try:
                 resp = await client.post(_REST_URL, params=params, json=payload)
+
+                if resp.status_code in _RETRYABLE_STATUSES:
+                    last_exc = GeminiError(f"Gemini {resp.status_code}: {resp.text[:200]}")
+                    logger.warning(
+                        f"Gemini {resp.status_code} on attempt {attempt + 1}/{retries}, "
+                        f"retrying with backoff…"
+                    )
+                    if attempt < retries - 1:
+                        await _sleep_with_backoff(attempt)
+                        continue
+                    # Last attempt — fall through to raise below.
+
                 if resp.status_code == 429:
                     body = resp.json()
                     msg = json.dumps(body)
                     logger.error(f"Gemini 429 on attempt {attempt + 1}: {msg[:200]}")
+                    # Quota errors aren't going to clear in 8 seconds — fail fast.
                     raise GeminiError(f"Quota exceeded: {msg}")
+
                 resp.raise_for_status()
                 data = resp.json()
                 raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -58,9 +83,13 @@ async def generate_json(prompt: str, retries: int = 2) -> Any:
             except json.JSONDecodeError as exc:
                 last_exc = exc
                 logger.info(f"JSON parse failed on attempt {attempt + 1}, retrying...")
+                if attempt < retries - 1:
+                    await _sleep_with_backoff(attempt)
             except Exception as exc:
                 last_exc = exc
                 logger.warning(f"Gemini error attempt {attempt + 1}: {exc}")
+                if attempt < retries - 1:
+                    await _sleep_with_backoff(attempt)
 
     raise GeminiError(f"Gemini failed after {retries} attempts: {last_exc}")
 
