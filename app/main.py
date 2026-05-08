@@ -130,6 +130,9 @@ def create_app() -> FastAPI:
     app.include_router(share_router, prefix=API_V1)
     app.include_router(projects_router, prefix=API_V1)
 
+    from app.api.v1.admin import router as admin_router
+    app.include_router(admin_router, prefix=API_V1)
+
     # Serve seed preview thumbnails as static files
     from pathlib import Path
     previews_dir = Path(__file__).resolve().parent.parent / "seeds" / "previews"

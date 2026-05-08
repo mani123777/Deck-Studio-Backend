@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 class Settings(BaseSettings):
     MYSQL_URL: str = "mysql+aiomysql://root:password@localhost:3306/wacdeckstudio"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./wacdeckstudio.db"
     REDIS_URL: str = "redis://localhost:6379/0"
     SECRET_KEY: str = "change-me-in-production"
     GEMINI_API_KEY: str = ""
