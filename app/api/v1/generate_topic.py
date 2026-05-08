@@ -24,6 +24,7 @@ async def generate_from_topic(
     style: str = Form(""),
     slide_count: int = Form(10),
     depth: str = Form("standard"),
+    level: str = Form("simple"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -47,6 +48,7 @@ async def generate_from_topic(
             style=style,
             slide_count=slide_count,
             depth=depth,
+            level=level,
             db=db,
         ),
         media_type="text/event-stream",

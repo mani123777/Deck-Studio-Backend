@@ -135,6 +135,8 @@ $content
 
 Required slide count: $slide_count
 
+$level_instructions
+
 Instructions:
 1. Analyze the content to extract title, summary, audience, and sections
 2. Generate slide content for exactly $slide_count slides (title slide first, agenda second, closing last, content/stats in between)
@@ -234,6 +236,43 @@ Rules:
 - Use type "content" for narrative sections.
 - Length: exactly $slide_count items. Pad or condense as needed but never invent material.
 """)
+
+
+_SIMPLE_INSTRUCTIONS = (
+    "Visual style: SIMPLE. Keep slides text-driven. Use the standard mix of "
+    "title / agenda / content / stats / closing. Do not add image, chart, or "
+    "process diagram blocks unless the source explicitly demands them."
+)
+
+_ADVANCED_INSTRUCTIONS = """Visual style: ADVANCED. The deck must feel visually rich and information-dense.
+Make deliberate use of these slide patterns when the content supports them:
+
+- "stats" slides — every time the source contains 2+ comparable numbers, render
+  them as a stats slide (3–4 KPIs side by side: "47%", "3.2x", "$1.4B").
+- Numeric-trend slides — populate the slide content with a `chart` payload:
+  `{"chart_type": "bar"|"line"|"pie", "chart_data": [{"label":"Q1","value":12}, ...]}`.
+  Use bar for category comparisons, line for time series, pie for share-of-total.
+  Include 3–8 data points; only use real numbers from the source.
+- Process / flow slides — for any "step 1 → step 2 → step 3" content, output a
+  `process_circle` block per step with a single-word label.
+- Image placeholders — when a slide would benefit from a visual, add an `image`
+  block whose `content` is a SHORT english description (≤8 words) of the image
+  to render later (e.g. "skyline of mumbai at night", "doctor reviewing a tablet").
+  The frontend will use these descriptions to generate AI images.
+- Quote slides — for any pull-quote-worthy sentence in the source, use a "quote"
+  slide with the exact text and attribution.
+- Timeline slides — chronological bullets with a date prefix.
+
+Keep at least one stats, one chart, and one image-placeholder slide if the
+source supports them. Never invent statistics or quotes.
+"""
+
+
+def level_instructions(level: str | None) -> str:
+    """Return the level-specific instruction block for prompt rendering."""
+    if (level or "simple").lower() == "advanced":
+        return _ADVANCED_INSTRUCTIONS
+    return _SIMPLE_INSTRUCTIONS
 
 
 def render(template: Template, **kwargs) -> str:

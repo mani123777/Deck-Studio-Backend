@@ -11,6 +11,7 @@ from app.ai import gemini_client
 from app.ai.prompt_templates import (
     RESEARCH_SUMMARY_PROMPT,
     TOPIC_OUTLINE_PROMPT,
+    level_instructions,
     render,
 )
 from app.models.theme import Theme
@@ -47,6 +48,7 @@ async def stream_generation(
     slide_count: int,
     depth: str,
     db: AsyncSession,
+    level: str = "simple",
 ) -> AsyncIterator[str]:
     """Drive the topic-driven generation pipeline as an SSE stream."""
     from app.agents.generation.preview_generator_agent import _build_outline as _legacy_build_outline  # noqa: F401
@@ -153,6 +155,9 @@ async def stream_generation(
         slide_count=slide_count,
         brief=json.dumps(brief, indent=2),
     )
+    # Bias the outline planner toward stats / charts / process / image slides
+    # when the user picked Advanced.
+    outline_prompt += "\n\n" + level_instructions(level)
     try:
         outline_raw = await gemini_client.generate_json(outline_prompt)
     except Exception as exc:
