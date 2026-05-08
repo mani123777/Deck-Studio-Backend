@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import gemini_client
-from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, render
+from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, level_instructions, render
 from app.api.dependencies import get_current_user
 from app.config import settings
 from app.core.database import get_db
@@ -215,6 +215,7 @@ async def generate_sync(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     images: list[UploadFile] = File(default=[]),
+    level: str = Form("simple"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PreviewResponse:
@@ -290,6 +291,7 @@ async def generate_sync(
         prompt=prompt,
         content=content,
         slide_count=slide_count,
+        level_instructions=level_instructions(level),
     )
     if image_payloads:
         combined_prompt += (

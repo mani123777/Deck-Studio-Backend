@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import gemini_client
-from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, render
+from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, level_instructions, render
 from app.api.dependencies import get_current_user
 from app.api.v1.generate_sync import _extract_file_text, _extract_url_text
 from app.core.database import get_db
@@ -35,6 +35,7 @@ async def _stream_generation(
     file_text: str,
     url_text: str,
     images: list[tuple[bytes, str]],
+    level: str,
     db: AsyncSession,
 ) -> AsyncIterator[str]:
     """Drive generation step-by-step, emitting SSE events as work progresses."""
@@ -66,6 +67,7 @@ async def _stream_generation(
         prompt=prompt,
         content=content,
         slide_count=slide_count,
+        level_instructions=level_instructions(level),
     )
     if images:
         combined_prompt += (
@@ -153,6 +155,7 @@ async def generate_stream(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     images: list[UploadFile] = File(default=[]),
+    level: str = Form("simple"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -203,7 +206,7 @@ async def generate_stream(
         )
 
     return StreamingResponse(
-        _stream_generation(prompt, slide_count, file_text, url_text, image_payloads, db),
+        _stream_generation(prompt, slide_count, file_text, url_text, image_payloads, level, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
