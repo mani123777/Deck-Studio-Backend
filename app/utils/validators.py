@@ -7,6 +7,21 @@ from typing import Optional
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 ALLOWED_EXTENSIONS = {".txt", ".docx", ".pdf"}
 
+SLIDE_COUNT_RE = re.compile(r"\b(\d{1,3})\s*[-\s]?slides?\b", re.IGNORECASE)
+
+
+def extract_slide_count_from_prompt(prompt: str) -> Optional[int]:
+    """Return the first '<N> slide(s)' / '<N>-slide' count found in the prompt, else None."""
+    if not prompt:
+        return None
+    match = SLIDE_COUNT_RE.search(prompt)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
 
 def validate_email(email: str) -> bool:
     return bool(EMAIL_RE.match(email))
