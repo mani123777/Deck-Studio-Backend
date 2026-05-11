@@ -17,7 +17,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.gemini_client import generate_json
+from app.ai.gemini_client import generate_json, get_last_token_count
 from app.core.exceptions import GeminiError, NotFoundError, ValidationError
 from app.models.presentation import Presentation
 from app.models.role_prompt import RolePromptProfile
@@ -383,5 +383,6 @@ No markdown fences, no commentary."""
         slides=slide_schemas,
         theme_id=str(theme.id),
         template_id=str(template.id),
+        token_count=get_last_token_count(),
     )
     return await presentation_service.create_presentation(db, user, create_req)

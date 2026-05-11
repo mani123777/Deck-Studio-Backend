@@ -119,6 +119,7 @@ async def stream_generation(
     )
     try:
         brief = await gemini_client.generate_json(summary_prompt)
+        token_count = gemini_client.get_last_token_count()
     except Exception as exc:
         logger.exception("Research summary failed")
         msg = str(exc)
@@ -160,6 +161,7 @@ async def stream_generation(
     outline_prompt += "\n\n" + level_instructions(level)
     try:
         outline_raw = await gemini_client.generate_json(outline_prompt)
+        token_count += gemini_client.get_last_token_count()
     except Exception as exc:
         logger.exception("Outline generation failed")
         yield _sse("error", {"message": f"Outline failed: {exc}"})
@@ -280,7 +282,7 @@ async def stream_generation(
         yield _sse("slide", {"index": i, "total": len(outline), "slide": slide})
         await asyncio.sleep(0.02)
 
-    yield _sse("complete", {"slide_count": len(outline)})
+    yield _sse("complete", {"slide_count": len(outline), "token_count": token_count})
 
 
 def _build_notes(content: dict, brief: dict) -> str:

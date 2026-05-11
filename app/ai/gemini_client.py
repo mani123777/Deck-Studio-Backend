@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextvars import ContextVar
 import json
 import random
 import re
@@ -24,6 +25,20 @@ _IMAGE_TIMEOUT = 60.0
 
 # Status codes that indicate transient Google-side overload — worth retrying.
 _RETRYABLE_STATUSES = {500, 502, 503, 504}
+_LAST_TOKEN_COUNT: ContextVar[int] = ContextVar("last_gemini_token_count", default=0)
+
+
+def _record_usage(data: dict[str, Any]) -> None:
+    usage = data.get("usageMetadata") or data.get("usage_metadata") or {}
+    total = usage.get("totalTokenCount") or usage.get("total_token_count") or 0
+    try:
+        _LAST_TOKEN_COUNT.set(max(0, int(total)))
+    except (TypeError, ValueError):
+        _LAST_TOKEN_COUNT.set(0)
+
+
+def get_last_token_count() -> int:
+    return _LAST_TOKEN_COUNT.get()
 
 
 async def _sleep_with_backoff(attempt: int) -> None:
@@ -73,6 +88,7 @@ async def generate_json(prompt: str, retries: int = 4) -> Any:
 
                 resp.raise_for_status()
                 data = resp.json()
+                _record_usage(data)
                 raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 if raw.startswith("```"):
                     lines = raw.split("\n")
@@ -131,6 +147,7 @@ async def generate_json_multimodal(
                     raise GeminiError(f"Quota exceeded: {resp.text[:200]}")
                 resp.raise_for_status()
                 data = resp.json()
+                _record_usage(data)
                 raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 if raw.startswith("```"):
                     lines = raw.split("\n")

@@ -307,6 +307,7 @@ async def generate_sync(
             )
         else:
             result = await gemini_client.generate_json(combined_prompt)
+        token_count = gemini_client.get_last_token_count()
     except Exception as exc:
         logger.error(f"Generation failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Content analysis failed: {exc}")
@@ -356,4 +357,4 @@ async def generate_sync(
     }
 
     logger.info(f"Sync generation complete: {len(slides)} slides for user {current_user.id}")
-    return PreviewResponse(slides=slides, theme=theme_dict)
+    return PreviewResponse(slides=slides, theme=theme_dict, token_count=token_count)

@@ -80,6 +80,7 @@ async def _stream_generation(
             result = await gemini_client.generate_json_multimodal(combined_prompt, images)
         else:
             result = await gemini_client.generate_json(combined_prompt)
+        token_count = gemini_client.get_last_token_count()
     except Exception as exc:
         logger.error(f"Streaming generation: analysis failed: {exc}")
         yield _sse("error", {"message": f"Generation failed: {exc}"})
@@ -143,7 +144,7 @@ async def _stream_generation(
         # tiny pause so the browser actually flushes between events
         await asyncio.sleep(0.02)
 
-    yield _sse("complete", {"slide_count": len(outline)})
+    yield _sse("complete", {"slide_count": len(outline), "token_count": token_count})
 
 
 @router.post("/stream")
