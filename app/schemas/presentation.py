@@ -58,6 +58,7 @@ class PresentationListItem(BaseModel):
     is_preview: bool
     total_slides: int
     slide_count: int
+    token_count: int = 0
     created_at: str
     updated_at: str = ""
     preview_slide: Optional[SlideSchema] = None
@@ -76,6 +77,7 @@ class UpdatePresentationRequest(BaseModel):
     theme_id: Optional[str] = None
     slides: Optional[list[SlideSchema]] = None
     layouts: Optional[list[DeckLayoutSchema]] = None
+    token_count: Optional[int] = None
 
 
 class CreatePresentationRequest(BaseModel):
@@ -85,3 +87,4 @@ class CreatePresentationRequest(BaseModel):
     theme_id: str
     template_id: str = ""
     logo_url: str = ""
+    token_count: int = 0

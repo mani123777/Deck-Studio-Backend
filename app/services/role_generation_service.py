@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.gemini_client import generate_json
+from app.ai.gemini_client import generate_json, get_last_token_count
 from app.core.exceptions import GeminiError, NotFoundError, ValidationError
 from app.models.presentation import Presentation
 from app.models.project import Project, ProjectDocument, ProjectPresentationLink
@@ -282,7 +282,7 @@ async def _generate_replacements_chunked(
     slides: list[dict[str, Any]],
     slots: list[dict[str, Any]],
     profile: dict[str, str],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     """Group slots by slide and chunk into Gemini calls of ~SLIDES_PER_CHUNK
     slides each. Each call shares the same project/role/corpus context so the
     deck stays coherent. Replacements from all calls are merged."""
@@ -295,10 +295,11 @@ async def _generate_replacements_chunked(
             raise
         except Exception as exc:
             raise GeminiError(f"Role generation failed: {exc}") from exc
+        token_count = get_last_token_count()
         replacements = (
             ai_result.get("replacements", {}) if isinstance(ai_result, dict) else {}
         )
-        return replacements if isinstance(replacements, dict) else {}
+        return (replacements if isinstance(replacements, dict) else {}), token_count
 
     # Group slots by slide_order so slides aren't split across chunks
     by_slide: dict[int, list[dict[str, Any]]] = {}
@@ -307,6 +308,7 @@ async def _generate_replacements_chunked(
     ordered_slides = sorted(by_slide.keys())
 
     merged: dict[str, Any] = {}
+    total_tokens = 0
     for chunk_start in range(0, len(ordered_slides), SLIDES_PER_CHUNK):
         chunk_orders = ordered_slides[chunk_start : chunk_start + SLIDES_PER_CHUNK]
         chunk_slots: list[dict[str, Any]] = []
@@ -329,12 +331,13 @@ async def _generate_replacements_chunked(
             raise GeminiError(
                 f"Role generation failed on {chunk_label}: {exc}"
             ) from exc
+        total_tokens += get_last_token_count()
         chunk_replacements = (
             ai_result.get("replacements", {}) if isinstance(ai_result, dict) else {}
         )
         if isinstance(chunk_replacements, dict):
             merged.update(chunk_replacements)
-    return merged
+    return merged, total_tokens
 
 
 def _apply_replacements(
@@ -432,10 +435,12 @@ async def generate_role_presentation(
     corpus = _build_corpus(documents)
 
     if slots:
-        replacements = await _generate_replacements_chunked(
+        replacements, token_count = await _generate_replacements_chunked(
             req.role, project, template, corpus, slides, slots, profile,
         )
         _apply_replacements(slides, replacements)
+    else:
+        token_count = 0
 
     title = (
         (req.title or "").strip()
@@ -451,6 +456,7 @@ async def generate_role_presentation(
         logo_url="",
         slides=slides,
         is_preview=False,
+        token_count=token_count,
     )
     db.add(presentation)
     await db.flush()
@@ -480,6 +486,7 @@ async def generate_role_presentation(
         metadata={
             "role": req.role,
             "slide_count": len(presentation.slides) if presentation.slides else 0,
+            "token_count": token_count,
             "source_document_count": len(documents),
         },
     )

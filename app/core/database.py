@@ -22,15 +22,20 @@ async def init_db() -> None:
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        if not url.startswith("sqlite"):
-            await _apply_inline_migrations(conn)
+        await _apply_inline_migrations(conn)
 
 
 async def _apply_inline_migrations(conn) -> None:
     """Idempotent column additions. Replace with Alembic in production."""
     from sqlalchemy import text
 
+    dialect = conn.dialect.name
+
     async def _column_exists(table: str, column: str) -> bool:
+        if dialect == "sqlite":
+            result = await conn.execute(text(f"PRAGMA table_info({table})"))
+            return any(row[1] == column for row in result.fetchall())
+
         result = await conn.execute(
             text(
                 "SELECT COUNT(*) FROM information_schema.columns "
@@ -41,14 +46,24 @@ async def _apply_inline_migrations(conn) -> None:
         )
         return (result.scalar() or 0) > 0
 
+    async def _create_index(name: str, table: str, column: str) -> None:
+        if dialect == "sqlite":
+            await conn.execute(
+                text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
+            )
+        else:
+            await conn.execute(text(f"CREATE INDEX {name} ON {table} ({column})"))
+
     # P4: regeneration history columns on project_presentation_links
     if not await _column_exists("project_presentation_links", "prior_link_id"):
         await conn.execute(
             text(
                 "ALTER TABLE project_presentation_links "
-                "ADD COLUMN prior_link_id VARCHAR(36) NULL, "
-                "ADD INDEX idx_ppl_prior (prior_link_id)"
+                "ADD COLUMN prior_link_id VARCHAR(36) NULL"
             )
+        )
+        await _create_index(
+            "idx_ppl_prior", "project_presentation_links", "prior_link_id"
         )
     if not await _column_exists("project_presentation_links", "version"):
         await conn.execute(
@@ -61,19 +76,38 @@ async def _apply_inline_migrations(conn) -> None:
     # P6: backfill project_members from Project.owner_id so existing projects
     # remain accessible after RBAC is enforced. Idempotent — only inserts
     # rows that don't already exist.
-    await conn.execute(
-        text(
-            "INSERT IGNORE INTO project_members "
-            "(id, project_id, user_id, role, invited_by, created_at, updated_at) "
-            "SELECT UUID(), p.id, p.owner_id, 'owner', p.owner_id, "
-            "       COALESCE(p.created_at, UTC_TIMESTAMP()), UTC_TIMESTAMP() "
-            "FROM projects p "
-            "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM project_members m "
-            "  WHERE m.project_id = p.id AND m.user_id = p.owner_id"
-            ")"
+    if dialect == "sqlite":
+        await conn.execute(
+            text(
+                "INSERT OR IGNORE INTO project_members "
+                "(id, project_id, user_id, role, invited_by, created_at, updated_at) "
+                "SELECT "
+                "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || "
+                "lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || "
+                "lower(hex(randomblob(6))), "
+                "p.id, p.owner_id, 'owner', p.owner_id, "
+                "COALESCE(p.created_at, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP "
+                "FROM projects p "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM project_members m "
+                "  WHERE m.project_id = p.id AND m.user_id = p.owner_id"
+                ")"
+            )
         )
-    )
+    else:
+        await conn.execute(
+            text(
+                "INSERT IGNORE INTO project_members "
+                "(id, project_id, user_id, role, invited_by, created_at, updated_at) "
+                "SELECT UUID(), p.id, p.owner_id, 'owner', p.owner_id, "
+                "       COALESCE(p.created_at, UTC_TIMESTAMP()), UTC_TIMESTAMP() "
+                "FROM projects p "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM project_members m "
+                "  WHERE m.project_id = p.id AND m.user_id = p.owner_id"
+                ")"
+            )
+        )
 
     # P-Templates: discriminator + ownership columns on `templates`. Rows that
     # existed before this migration are seeded built-ins, so they get
@@ -107,10 +141,10 @@ async def _apply_inline_migrations(conn) -> None:
         await conn.execute(
             text(
                 "ALTER TABLE templates "
-                "ADD COLUMN created_by VARCHAR(36) NULL, "
-                "ADD INDEX idx_templates_created_by (created_by)"
+                "ADD COLUMN created_by VARCHAR(36) NULL"
             )
         )
+        await _create_index("idx_templates_created_by", "templates", "created_by")
     if not await _column_exists("templates", "role"):
         await conn.execute(
             text(
@@ -125,6 +159,16 @@ async def _apply_inline_migrations(conn) -> None:
             text(
                 "ALTER TABLE presentations "
                 "ADD COLUMN layouts JSON NULL"
+            )
+        )
+
+    # P-Tokens: total AI tokens used to create the deck. Existing decks predate
+    # tracking, so they get 0.
+    if not await _column_exists("presentations", "token_count"):
+        await conn.execute(
+            text(
+                "ALTER TABLE presentations "
+                "ADD COLUMN token_count INT NOT NULL DEFAULT 0"
             )
         )
 

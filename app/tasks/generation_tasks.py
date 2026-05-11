@@ -23,6 +23,7 @@ async def _run_generation(job_id: str, logo_url: str | None):
     from app.agents.generation.template_mapper_agent import TemplateMappingAgent
     from app.agents.generation.outline_agent import OutlineAgent
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
+    from app.ai.gemini_client import get_last_token_count
 
     async with _session_factory() as db:
         job = (
@@ -52,6 +53,7 @@ async def _run_generation(job_id: str, logo_url: str | None):
             # 10% → 20%: content extraction & analysis
             analyzer = ContentAnalyzerAgent()
             analysis = await analyzer.run(job.file_path)
+            token_count = get_last_token_count()
             await set_progress(20)
 
             # 20% → 30%: template mapping
@@ -64,11 +66,13 @@ async def _run_generation(job_id: str, logo_url: str | None):
             await db.commit()
             outline_agent = OutlineAgent()
             outline = await outline_agent.run(analysis)
+            token_count += get_last_token_count()
             await set_progress(50)
 
             # 50% → 80%: per-slide content generation in parallel (Phase 2)
             generator = SlideGeneratorAgent()
             slides = await generator.run(outline, analysis, mapping, logo_url or "")
+            token_count += get_last_token_count()
             await set_progress(80)
 
             # 80% → 90%: persist presentation
@@ -83,6 +87,7 @@ async def _run_generation(job_id: str, logo_url: str | None):
                 logo_url=logo_url or "",
                 slides=slides,
                 is_preview=False,
+                token_count=token_count,
             )
             db.add(presentation)
             await db.commit()
