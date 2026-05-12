@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import gemini_client
-from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, render
+from app.ai.prompt_templates import COMBINED_GENERATION_PROMPT, level_instructions, render
 from app.api.dependencies import get_current_user
 from app.config import settings
 from app.core.database import get_db
@@ -215,6 +215,7 @@ async def generate_sync(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     images: list[UploadFile] = File(default=[]),
+    level: str = Form("simple"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PreviewResponse:
@@ -230,7 +231,8 @@ async def generate_sync(
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
     from app.agents.generation.template_mapper_agent import TemplateMappingResult
 
-    slide_count = max(5, min(20, slide_count))
+    slide_count = max(1, min(30, slide_count))
+    normalized_level = "advanced" if (level or "").lower() == "advanced" else "simple"
 
     # Build the source content from prompt + optional file + optional url
     parts: list[str] = []
@@ -290,6 +292,8 @@ async def generate_sync(
         prompt=prompt,
         content=content,
         slide_count=slide_count,
+        level=normalized_level,
+        level_instructions=level_instructions(normalized_level),
     )
     if image_payloads:
         combined_prompt += (
@@ -320,7 +324,7 @@ async def generate_sync(
     }
 
     # Build outline deterministically from sections
-    outline = _build_outline(analysis)
+    outline = _build_outline(analysis, target_slide_count=slide_count)
 
     # Use slide contents from the combined response
     contents: list[dict] = result.get("slides", [])

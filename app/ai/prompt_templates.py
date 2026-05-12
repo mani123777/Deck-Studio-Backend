@@ -125,8 +125,9 @@ Respond with valid JSON array only.
 """)
 
 
-COMBINED_GENERATION_PROMPT = Template("""
-You are a professional presentation creator. Analyze the provided content and generate a complete presentation in ONE response.
+OUTLINE_ONLY_PROMPT = Template("""
+You are planning a presentation. Produce ONLY an outline — slide titles and types — not slide content.
+This is fast and lets the user review the structure before paying for full slide generation.
 
 User prompt: $prompt
 
@@ -134,45 +135,129 @@ Document content:
 $content
 
 Required slide count: $slide_count
+Presentation level: $level
 
-Instructions:
-1. Analyze the content to extract title, summary, audience, and sections
-2. Generate slide content for exactly $slide_count slides (title slide first, agenda second, closing last, content/stats in between)
-3. Use type "stats" for slides with numeric data/metrics, "content" for everything else
-
-Return ONLY this JSON structure (no markdown, no explanation):
+Return ONLY this JSON (no markdown, no explanation):
 {
-  "title": "Presentation title (≤10 words)",
-  "summary": "2-3 sentence summary",
+  "title": "Deck title (≤10 words)",
+  "summary": "2 sentences",
   "audience": "Target audience",
   "tone": "professional",
   "sections": [
-    {"name": "section name", "content": "key points", "slide_count": 1}
+    {"name": "Section name", "content": "1-line description", "slide_count": 2}
   ],
   "slides": [
     {
-      "type": "title|agenda|content|stats|closing",
-      "heading": "Slide heading (≤8 words)",
-      "body": "",
-      "bullets": ["bullet 1", "bullet 2"],
-      "stats": [],
-      "quote": "",
-      "caption": ""
+      "order": 1,
+      "type": "title|agenda|content|stats|quote|chart|roadmap|closing",
+      "title": "Slide title (≤8 words)"
     }
   ]
 }
 
 Rules:
-- slides array must have exactly $slide_count items
-- slides[0] is always type "title"
-- slides[1] is always type "agenda" with bullets listing section names
-- slides[-1] is always type "closing"
-- stats array only used for type "stats" slides (format: "47% Cost Reduction")
-- bullets empty for title and closing slides
-- All content must come from the source document — no invented facts
-- All fields always present, use "" or [] when not applicable
+- slides array MUST have exactly $slide_count items
+- slides[0].type = "title"; slides[1].type = "agenda"; slides[-1].type = "closing"
+- For middle slides, pick the type that best fits each slide's intended content
+- Only suggest "chart" type when the source contains comparable numbers; "roadmap" when there's a phased/sequenced topic; "stats" when there are standalone metrics; "quote" when the source has a quotation
+- DO NOT produce bullets, body, stats values, chart data, or notes — just title + type
+- All slide topics must come from the source — no invented topics
+""")
+
+
+COMBINED_GENERATION_PROMPT = Template("""
+Generate a presentation deck as JSON.
+
+User prompt: $prompt
+
+Source content:
+$content
+
+Slide count: exactly $slide_count
+Level: $level
+$level_instructions
+
+Slide types: title | agenda | content | stats | quote | chart | roadmap | comparison | kanban | funnel | closing
+- title=opener, agenda=section list, closing=final. Middle slides pick the best fit.
+- CRITICAL: structured types (stats/chart/roadmap/comparison/kanban/funnel/quote) require REAL supporting data. If you pick `comparison` you MUST fill BOTH left.items AND right.items with 3+ items each. If you pick `chart` you MUST fill chart.data with 3+ numeric (label, value) pairs. If you pick `kanban` you MUST fill all 3 columns with items. If you pick `funnel` you MUST fill 3+ stages with labels and values. If you pick `roadmap` you MUST fill 3+ {phase, label} items. If you pick `stats` you MUST fill 2+ items.
+- NEVER pick a structured type and leave its supporting field empty — that produces a broken slide. If you can't fill it from the source, use `content` instead.
+- Never invent facts or numbers. If the source doesn't support a structured type, use content.
+
+Return ONLY this JSON (no markdown):
+{
+  "title": "≤10 words",
+  "summary": "2 sentences",
+  "audience": "...",
+  "tone": "professional",
+  "sections": [{"name": "...", "content": "...", "slide_count": 1}],
+  "slides": [
+    {
+      "type": "content",
+      "heading": "≤8 words",
+      "body": "",
+      "bullets": ["≤14 words each"],
+      "stats": ["47% Cost Reduction"],
+      "quote": "",
+      "caption": "",
+      "chart": {"type": "bar|line|pie", "data": [{"label": "Q1", "value": 12}]},
+      "roadmap": [{"phase": "Q1 2026", "label": "≤8 words"}],
+      "comparison": {"left": {"label": "Before", "items": ["..."]}, "right": {"label": "After", "items": ["..."]}},
+      "columns": [{"label": "Problem", "items": ["..."]}, {"label": "Solution", "items": ["..."]}, {"label": "Result", "items": ["..."]}],
+      "funnel": [{"label": "Visitors", "value": "10,000"}],
+      "image_prompt": "",
+      "notes": "2–3 sentences, ≤80 words, natural spoken language"
+    }
+  ]
+}
+
+Constraints:
+- slides[] length = $slide_count. slides[0].type="title". slides[1].type="agenda" (bullets = section names). slides[-1].type="closing".
+- bullets ≤6 items, ≤14 words each. Empty for title/closing/chart/roadmap/comparison/kanban/funnel.
+- stats: 2–4 items only on type=stats. Format "<NUMBER><UNIT> <Label>".
+- chart.data: 3–8 (label, numeric value) pairs, only on type=chart.
+- roadmap: 3–6 {phase, label} items, only on type=roadmap.
+- comparison: 3–5 items per side, only on type=comparison.
+- columns: exactly 3 columns, 2–4 items each, only on type=kanban.
+- funnel: 3–5 stages, only on type=funnel.
+- image_prompt: optional, ≤2 per deck, one short sentence. "" otherwise.
+- STRICT: leave EVERY structured field EMPTY ({} or []) on slides where its type doesn't match. A "kanban" slide must have `comparison: {}` and `funnel: []` and `chart: {}` and `roadmap: []`. A "chart" slide must have `comparison: {}`, `columns: []`, `funnel: []`, `roadmap: []`. Filling structured fields on the wrong slide type renders broken panels.
+- All fields always present. Use "", [], or {} when empty.
 """)
 
 
 def render(template: Template, **kwargs) -> str:
     return template.substitute(**kwargs)
+
+
+# Level-specific guidance injected into COMBINED_GENERATION_PROMPT.
+# Maps to slide types the renderer supports: title, agenda, content, stats, quote, closing.
+LEVEL_INSTRUCTIONS_SIMPLE = """\
+Style: minimal, clean, professional. The audience scans, doesn't read.
+- Use ONLY these slide types: title, agenda, content, closing. At most 1 "stats" slide if the source has real numbers.
+- Do NOT use "chart", "roadmap", "comparison", "kanban", "funnel", "quote", or "image_prompt" — keep image_prompt as "".
+- "content" slides use 3–5 short bullets (≤8 words per bullet).
+- Never invent data. No marketing fluff, no hype.
+- Leave the "caption" field empty unless a one-line clarifier genuinely helps.
+"""
+
+LEVEL_INSTRUCTIONS_ADVANCED = """\
+Style: rich, data-driven, executive-grade. Treat the deck like a board briefing — Gamma-quality visual variety.
+- All slide types available: content, stats, quote, chart, roadmap, comparison, kanban, funnel. Pick whichever genuinely fits — DO NOT default everything to content.
+- AIM for visual variety: in a 10-slide deck, target ~2 stats slides, 1 chart, 1 roadmap or comparison or kanban or funnel, 1 quote (if source has one), rest content. Adjust if source doesn't support a type.
+- "stats" slides: 2–4 standalone metrics ("47% Cost Reduction", "$2.4M ARR").
+- "chart": fill chart.data with real (label, numeric value) pairs. Pick chart.type: bar=comparisons, line=time series, pie=parts-of-whole.
+- "roadmap": 3–6 phases/milestones with concrete labels.
+- "comparison": two sides with 3–5 items each — before/after, manual/automated, us/them.
+- "kanban": exactly 3 columns — problem/solution/result, before/now/after.
+- "funnel": 3–5 stages with real numbers showing drop-off.
+- "quote": only when source has an actual quotation.
+- "image_prompt": Use on the TITLE slide (mandatory hero image) and on 2–4 more slides that benefit from visual support (people/places/products/concepts/team). Up to 5 image_prompts total per deck. One short sentence each. Leave "" on data-heavy slides (stats/chart/comparison/kanban/funnel — the data IS the visual).
+- Content bullets up to ~16 words; carry insight, not labels.
+- Notes per slide: 2–3 sentences a presenter would actually say, ≤80 words.
+- Never invent facts. If a structured type can't be backed by source data, fall back to content.
+"""
+
+
+def level_instructions(level: str) -> str:
+    """Return guidance block for the given deck level."""
+    return LEVEL_INSTRUCTIONS_ADVANCED if (level or "").lower() == "advanced" else LEVEL_INSTRUCTIONS_SIMPLE

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PositionSchema(BaseModel):
@@ -21,12 +21,24 @@ class StylingSchema(BaseModel):
     text_align: str = "left"
 
 
+class ChartDataPointSchema(BaseModel):
+    label: str
+    value: float
+
+
 class BlockSchema(BaseModel):
+    # Block payloads carry block-type-specific extras (chart_type/chart_data
+    # today, possibly more later). Preserve them on round-trip so saves don't
+    # silently strip chart/image/roadmap data.
+    model_config = ConfigDict(extra="allow")
+
     id: str
     type: str
     content: str = ""
     position: PositionSchema
     styling: StylingSchema = StylingSchema()
+    chart_type: Optional[Literal["bar", "line", "pie"]] = None
+    chart_data: Optional[list[ChartDataPointSchema]] = None
 
 
 class SlideBackgroundSchema(BaseModel):
