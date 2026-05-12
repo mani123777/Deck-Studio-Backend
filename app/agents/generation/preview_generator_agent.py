@@ -233,8 +233,14 @@ Respond with valid JSON array only — no markdown, no explanation.
 """)
 
 
-def _build_outline(analysis: dict[str, Any]) -> list[dict]:
-    """Build slide outline deterministically from sample analysis — zero AI calls."""
+def _build_outline(analysis: dict[str, Any], target_slide_count: int | None = None) -> list[dict]:
+    """Build slide outline deterministically from analysis — zero AI calls.
+
+    If `target_slide_count` is provided, the middle (content) slot count is
+    expanded/compressed so the final outline matches it exactly. This lets
+    Gemini's per-section `slide_count` and the user-requested total drive the
+    real shape of the deck, instead of locking it to len(sections).
+    """
     sections = analysis.get("sections", [])
     title = analysis.get("title", "Presentation")
     section_names = [s["name"] for s in sections]
@@ -242,11 +248,9 @@ def _build_outline(analysis: dict[str, Any]) -> list[dict]:
     outline: list[dict] = []
     order = 1
 
-    # Title slide
     outline.append({"order": order, "type": "title", "title": title, "key_points": []})
     order += 1
 
-    # Agenda slide
     outline.append({
         "order": order,
         "type": "agenda",
@@ -255,22 +259,44 @@ def _build_outline(analysis: dict[str, Any]) -> list[dict]:
     })
     order += 1
 
-    # Content slides from sections
+    # ── Expand sections into content slots, honoring section.slide_count ──
+    # Each section contributes max(1, section.slide_count) entries.
+    middle_entries: list[dict] = []
     for section in sections:
         content = section.get("content", "")
-        # Detect stats slide by presence of numbers/percentages
+        try:
+            section_slides = max(1, int(section.get("slide_count", 1) or 1))
+        except (TypeError, ValueError):
+            section_slides = 1
         has_stats = any(c.isdigit() or c == "%" or c == "$" for c in content)
         slide_type = "stats" if has_stats and len(content) < 120 else "content"
+        for _ in range(section_slides):
+            middle_entries.append({
+                "type": slide_type,
+                "title": section["name"],
+                "key_points": [content],
+            })
 
-        outline.append({
-            "order": order,
-            "type": slide_type,
-            "title": section["name"],
-            "key_points": [content],
-        })
+    # If the caller requested a specific total, resize the middle to match.
+    # target = title + agenda + middle + closing → middle = target - 3
+    if target_slide_count is not None:
+        desired_middle = max(1, target_slide_count - 3)
+        if not middle_entries:
+            middle_entries = [{"type": "content", "title": "Overview", "key_points": [""]}]
+        if len(middle_entries) > desired_middle:
+            middle_entries = middle_entries[:desired_middle]
+        else:
+            # Pad by duplicating the last section so Gemini's extra slides have
+            # a slot. The actual slide content (and type) comes from the LLM,
+            # so the duplicated outline entry is just a placeholder.
+            while len(middle_entries) < desired_middle:
+                last = dict(middle_entries[-1])
+                middle_entries.append(last)
+
+    for entry in middle_entries:
+        outline.append({"order": order, **entry})
         order += 1
 
-    # Closing slide
     outline.append({
         "order": order,
         "type": "closing",

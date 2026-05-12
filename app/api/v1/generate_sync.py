@@ -231,7 +231,8 @@ async def generate_sync(
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
     from app.agents.generation.template_mapper_agent import TemplateMappingResult
 
-    slide_count = max(5, min(20, slide_count))
+    slide_count = max(1, min(30, slide_count))
+    normalized_level = "advanced" if (level or "").lower() == "advanced" else "simple"
 
     # Build the source content from prompt + optional file + optional url
     parts: list[str] = []
@@ -291,7 +292,8 @@ async def generate_sync(
         prompt=prompt,
         content=content,
         slide_count=slide_count,
-        level_instructions=level_instructions(level),
+        level=normalized_level,
+        level_instructions=level_instructions(normalized_level),
     )
     if image_payloads:
         combined_prompt += (
@@ -307,7 +309,6 @@ async def generate_sync(
             )
         else:
             result = await gemini_client.generate_json(combined_prompt)
-        token_count = gemini_client.get_last_token_count()
     except Exception as exc:
         logger.error(f"Generation failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Content analysis failed: {exc}")
@@ -323,7 +324,7 @@ async def generate_sync(
     }
 
     # Build outline deterministically from sections
-    outline = _build_outline(analysis)
+    outline = _build_outline(analysis, target_slide_count=slide_count)
 
     # Use slide contents from the combined response
     contents: list[dict] = result.get("slides", [])
@@ -357,4 +358,4 @@ async def generate_sync(
     }
 
     logger.info(f"Sync generation complete: {len(slides)} slides for user {current_user.id}")
-    return PreviewResponse(slides=slides, theme=theme_dict, token_count=token_count)
+    return PreviewResponse(slides=slides, theme=theme_dict)

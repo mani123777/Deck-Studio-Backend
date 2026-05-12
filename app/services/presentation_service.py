@@ -64,13 +64,19 @@ def _slide_dicts_to_schemas(slides: list) -> list[SlideSchema]:
     for s in (slides or []):
         blocks = []
         for b in s.get("blocks", []):
-            blocks.append({
+            # Pass the whole dict through so BlockSchema (extra="allow") keeps
+            # chart_type/chart_data and any future block-type-specific fields.
+            block_in = {
                 "id": b.get("id", ""),
                 "type": b.get("type", "text"),
                 "content": b.get("content", ""),
                 "position": b.get("position", {"x": 0, "y": 0, "w": 100, "h": 100}),
                 "styling": b.get("styling", {}),
-            })
+            }
+            for k, v in b.items():
+                if k not in block_in:
+                    block_in[k] = v
+            blocks.append(block_in)
         bg = s.get("background")
         result.append(SlideSchema(
             order=s.get("order", 0),
@@ -82,21 +88,33 @@ def _slide_dicts_to_schemas(slides: list) -> list[SlideSchema]:
     return result
 
 
+def _block_to_dict(b) -> dict:
+    """Serialize a BlockSchema preserving chart/image/etc. type-specific fields."""
+    out = {
+        "id": b.id,
+        "type": b.type,
+        "content": b.content,
+        "position": b.position.model_dump(),
+        "styling": b.styling.model_dump(),
+    }
+    if b.chart_type is not None:
+        out["chart_type"] = b.chart_type
+    if b.chart_data is not None:
+        out["chart_data"] = [d.model_dump() for d in b.chart_data]
+    # Forward-compat: include any other extras Pydantic captured via extra="allow".
+    extras = getattr(b, "__pydantic_extra__", None) or {}
+    for k, v in extras.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
 def _slide_to_dict(s) -> dict:
     return {
         "order": s.order,
         "type": s.type,
         "background": s.background.model_dump() if s.background else None,
-        "blocks": [
-            {
-                "id": b.id,
-                "type": b.type,
-                "content": b.content,
-                "position": b.position.model_dump(),
-                "styling": b.styling.model_dump(),
-            }
-            for b in s.blocks
-        ],
+        "blocks": [_block_to_dict(b) for b in s.blocks],
         "notes": getattr(s, "notes", "") or "",
     }
 
@@ -105,16 +123,7 @@ def _layout_to_dict(layout) -> dict:
     return {
         "id": layout.id,
         "name": layout.name,
-        "blocks": [
-            {
-                "id": b.id,
-                "type": b.type,
-                "content": b.content,
-                "position": b.position.model_dump(),
-                "styling": b.styling.model_dump(),
-            }
-            for b in layout.blocks
-        ],
+        "blocks": [_block_to_dict(b) for b in layout.blocks],
     }
 
 
