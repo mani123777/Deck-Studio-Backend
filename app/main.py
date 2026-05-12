@@ -145,6 +145,8 @@ def create_app() -> FastAPI:
     app.include_router(generate_stream_router, prefix=API_V1)
     from app.api.v1.generate_topic import router as generate_topic_router
     app.include_router(generate_topic_router, prefix=API_V1)
+    from app.api.v1.generate_slide_rewrite import router as generate_slide_rewrite_router
+    app.include_router(generate_slide_rewrite_router, prefix=API_V1)
     app.include_router(presentations_router, prefix=API_V1)
     app.include_router(export_router, prefix=API_V1)
     app.include_router(import_router, prefix=API_V1)
