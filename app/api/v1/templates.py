@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.gemini_client import generate_json
+from app.ai.gemini_client import generate_json, get_last_token_count
 from app.api.dependencies import get_current_user
 from app.core.database import get_db
 from app.core.exceptions import NotFoundError
@@ -324,10 +324,13 @@ Return ONLY valid JSON. No markdown fences, no commentary."""
 
         try:
             result = await generate_json(ai_prompt)
+            token_count = get_last_token_count()
         except Exception as exc:
             raise HTTPException(
                 status_code=500, detail=f"AI generation failed: {exc}"
             ) from exc
+    else:
+        token_count = 0
 
         replacements = (result or {}).get("replacements", {}) if isinstance(result, dict) else {}
         if not isinstance(replacements, dict):
@@ -387,6 +390,7 @@ Return ONLY valid JSON. No markdown fences, no commentary."""
         slides=slide_schemas,
         theme_id=str(theme.id),
         template_id=str(template.id),
+        token_count=token_count,
     )
 
     return await presentation_service.create_presentation(db, current_user, create_req)

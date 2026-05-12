@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,19 @@ def _slide_count(p: Presentation) -> int:
     return len(p.slides) if p.slides else 0
 
 
+def _token_count(p: Presentation) -> int:
+    if p.token_count and p.token_count > 0:
+        return p.token_count
+    payload = {
+        "title": p.title or "",
+        "description": p.description or "",
+        "slides": p.slides or [],
+    }
+    # Existing local decks predate usage tracking. Approximate for display by
+    # the common chars/4 heuristic so every deck can still show a useful value.
+    return max(0, round(len(json.dumps(payload, ensure_ascii=False)) / 4))
+
+
 def _to_list_item(p: Presentation, template_name: str = "") -> PresentationListItem:
     count = _slide_count(p)
     first_slide_schemas = _slide_dicts_to_schemas(p.slides[:1]) if p.slides else []
@@ -38,6 +52,7 @@ def _to_list_item(p: Presentation, template_name: str = "") -> PresentationListI
         is_preview=p.is_preview,
         total_slides=count,
         slide_count=count,
+        token_count=_token_count(p),
         created_at=p.created_at.isoformat() if p.created_at else "",
         updated_at=p.updated_at.isoformat() if p.updated_at else "",
         preview_slide=first_slide_schemas[0] if first_slide_schemas else None,
@@ -125,6 +140,7 @@ def _to_detail(p: Presentation, template_name: str = "") -> PresentationDetail:
         is_preview=p.is_preview,
         total_slides=count,
         slide_count=count,
+        token_count=_token_count(p),
         created_at=p.created_at.isoformat() if p.created_at else "",
         updated_at=p.updated_at.isoformat() if p.updated_at else "",
         slides=slides,
@@ -198,6 +214,8 @@ async def update_presentation(
         p.slides = [_slide_to_dict(s) for s in req.slides]
     if req.layouts is not None:
         p.layouts = [_layout_to_dict(l) for l in req.layouts]
+    if req.token_count is not None:
+        p.token_count = max(0, int(req.token_count or 0))
 
     await db.commit()
     await db.refresh(p)
@@ -237,6 +255,7 @@ async def create_presentation(
         slides=slides_data,
         is_preview=False,
         layouts=[],
+        token_count=max(0, int(req.token_count or 0)),
     )
     db.add(presentation)
     await db.commit()

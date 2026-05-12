@@ -93,3 +93,4 @@ class TemplateFilter(BaseModel):
 class PreviewResponse(BaseModel):
     slides: list[dict]
     theme: dict
+    token_count: int = 0
