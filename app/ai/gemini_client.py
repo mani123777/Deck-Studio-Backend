@@ -101,6 +101,12 @@ def _is_retryable_http_error(exc: Exception) -> bool:
 last_token_usage: dict[str, int] | None = None
 
 
+def get_last_token_count() -> int:
+    """Back-compat shim — returns just the total token count from the last
+    call. Prefer reading `last_token_usage` directly for full breakdown."""
+    return (last_token_usage or {}).get("total", 0)
+
+
 async def generate_json(prompt: str, retries: int = _DEFAULT_RETRIES) -> Any:
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],

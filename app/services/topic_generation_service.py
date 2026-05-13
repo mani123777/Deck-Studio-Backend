@@ -199,6 +199,73 @@ async def stream_generation(
     theme_fonts = theme.fonts
     content_idx = 0
 
+    # Image generation infra (advanced level only). Mirrors the prompt-mode
+    # stream: max 5 images per deck, serialized to 1 concurrent gen so we
+    # stay under the gemini-2.5-flash-image RPM cap.
+    normalized_level = (level or "simple").strip().lower()
+    MAX_IMAGES_PER_DECK = 5
+    _image_semaphore = asyncio.Semaphore(1)
+    IMAGE_STYLE_SUFFIX = (
+        ". Editorial photograph, soft natural light, shallow depth of field, "
+        "muted desaturated palette, clean composition, professional, no text overlay."
+    )
+    image_tasks: list[tuple[int, "asyncio.Task[str | None]"]] = []
+
+    async def _spawn_image_task(idx: int, prompt_text: str) -> "asyncio.Task[str | None]":
+        from app.ai.gemini_client import generate_image
+        from app.api.v1.images import GENERATED_DIR
+        import uuid
+
+        async def _one() -> str | None:
+            async with _image_semaphore:
+                try:
+                    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+                    full_prompt = prompt_text + IMAGE_STYLE_SUFFIX
+                    img_bytes, mime = await asyncio.wait_for(generate_image(full_prompt), timeout=40.0)
+                except Exception as exc:
+                    logger.warning(f"topic image_prompt failed for slide {idx}: {str(exc)[:200]}")
+                    return None
+                ext = mime.split("/")[-1] if "/" in mime else "png"
+                if ext == "jpeg":
+                    ext = "jpg"
+                fname = f"{uuid.uuid4()}.{ext}"
+                (GENERATED_DIR / fname).write_bytes(img_bytes)
+                await asyncio.sleep(2.0)
+                return f"/generated/{fname}"
+        return asyncio.create_task(_one())
+
+    def _image_block(slide_idx: int, url: str) -> dict:
+        return {
+            "id": f"img-{slide_idx}",
+            "type": "image",
+            "content": url,
+            "position": {"x": 720, "y": 180, "w": 500, "h": 460},
+            "styling": {
+                "font_family": "", "font_size": 0, "font_weight": 0,
+                "color": "transparent", "background_color": "transparent", "text_align": "left",
+            },
+        }
+
+    # Slide types that benefit from a generated photograph. Excludes:
+    # agenda (text list), sources (URL list), stats/chart/comparison/etc
+    # (the data is the visual), and closing (often a CTA).
+    _IMAGE_OK_TYPES = {"title", "content", "quote", "timeline"}
+
+    def _derive_image_prompt(slide_type: str, slide_content: dict) -> str:
+        """Build a short prompt for the image model from the slide content.
+
+        Topic-mode generation doesn't ask Gemini for image_prompts inline (the
+        research/outline prompts focus on factual fidelity). We synthesize
+        them deterministically from the slide title/heading so the call is
+        free and deterministic.
+        """
+        heading = (slide_content.get("heading") or "").strip()
+        if not heading:
+            return ""
+        if slide_type == "title":
+            return f"A striking hero image illustrating: {heading}"
+        return f"An editorial illustration of: {heading}, in the context of {topic}"
+
     # Pre-compute content payload per outline item using the brief.
     for i, item in enumerate(outline):
         slide_type = item.get("type") or "content"
@@ -280,7 +347,45 @@ async def stream_generation(
             "notes": _build_notes(content, brief),
         }
         yield _sse("slide", {"index": i, "total": len(outline), "slide": slide})
+
+        # Spawn an image task if eligible — advanced level, cap not hit, and
+        # the slide type can sensibly carry a photograph.
+        if (
+            normalized_level == "advanced"
+            and len(image_tasks) < MAX_IMAGES_PER_DECK
+            and slide_type in _IMAGE_OK_TYPES
+        ):
+            img_prompt = _derive_image_prompt(slide_type, content)
+            if img_prompt:
+                task = await _spawn_image_task(i, img_prompt)
+                image_tasks.append((i, task))
+
+        # Drain completed images so the user sees them appear progressively.
+        for slide_idx, task in image_tasks:
+            if task.done() and not getattr(task, "_drained", False):
+                task._drained = True
+                url = await task
+                if url:
+                    yield _sse("slide_image", {"index": slide_idx, "block": _image_block(slide_idx, url)})
+
         await asyncio.sleep(0.02)
+
+    # Drain any still-pending image tasks after the slide stream completes.
+    pending = [(idx, t) for idx, t in image_tasks if not getattr(t, "_drained", False)]
+    if pending:
+        yield _sse("status", {"step": "imaging", "message": f"Finalizing {len(pending)} image(s)…"})
+        while pending:
+            done_now = [(idx, t) for idx, t in pending if t.done()]
+            if done_now:
+                for slide_idx, t in done_now:
+                    t._drained = True
+                    url = await t
+                    if url:
+                        yield _sse("slide_image", {"index": slide_idx, "block": _image_block(slide_idx, url)})
+                        await asyncio.sleep(0.02)
+                pending = [(idx, t) for idx, t in pending if not getattr(t, "_drained", False)]
+            else:
+                await asyncio.sleep(0.25)
 
     yield _sse("complete", {"slide_count": len(outline), "token_count": token_count})
 
