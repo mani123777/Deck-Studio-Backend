@@ -28,6 +28,7 @@ from app.models.theme import Theme
 from app.models.user import User
 from app.schemas.template import PreviewResponse
 from app.utils.logger import get_logger
+from app.utils.validators import extract_slide_count_from_prompt
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 logger = get_logger(__name__)
@@ -231,8 +232,10 @@ async def generate_sync(
     from app.agents.generation.slide_generator_agent import SlideGeneratorAgent
     from app.agents.generation.template_mapper_agent import TemplateMappingResult
 
-    slide_count = max(1, min(30, slide_count))
-    normalized_level = "advanced" if (level or "").lower() == "advanced" else "simple"
+    prompt_slide_count = extract_slide_count_from_prompt(prompt)
+    if prompt_slide_count is not None:
+        slide_count = prompt_slide_count
+    slide_count = max(5, min(20, slide_count))
 
     # Build the source content from prompt + optional file + optional url
     parts: list[str] = []

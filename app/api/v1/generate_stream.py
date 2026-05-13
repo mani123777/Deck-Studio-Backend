@@ -23,6 +23,7 @@ from app.core.rate_limit import limiter
 from app.models.theme import Theme
 from app.models.user import User
 from app.utils.logger import get_logger
+from app.utils.validators import extract_slide_count_from_prompt
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 logger = get_logger(__name__)
@@ -374,17 +375,10 @@ async def generate_stream(
     analysis call is still made for theme/audience context, but Gemini is
     constrained to produce slides matching the user-confirmed outline.
     """
-    slide_count = max(1, min(30, slide_count))
-
-    user_outline: list[dict] | None = None
-    if outline_json:
-        try:
-            parsed = json.loads(outline_json)
-            if isinstance(parsed, list) and parsed:
-                user_outline = parsed
-                slide_count = len(parsed)
-        except Exception as exc:
-            logger.warning(f"Invalid outline_json: {exc} — falling back to auto-outline")
+    prompt_slide_count = extract_slide_count_from_prompt(prompt)
+    if prompt_slide_count is not None:
+        slide_count = prompt_slide_count
+    slide_count = max(5, min(20, slide_count))
 
     file_text = ""
     if file and file.filename:
