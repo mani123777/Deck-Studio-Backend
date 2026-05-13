@@ -420,6 +420,19 @@ async def generate_stream(
             detail="Provide a prompt, a document, a URL, or at least one image.",
         )
 
+    # Parse the optional user-confirmed outline. Bad JSON or wrong shape
+    # falls back to None (auto-outline) rather than 500-ing the request.
+    user_outline: list[dict] | None = None
+    if outline_json:
+        try:
+            parsed = json.loads(outline_json)
+            if isinstance(parsed, list) and all(isinstance(s, dict) for s in parsed):
+                user_outline = parsed
+            else:
+                logger.warning("outline_json was not a list of objects; ignoring")
+        except json.JSONDecodeError as exc:
+            logger.warning(f"outline_json was not valid JSON ({exc}); ignoring")
+
     return StreamingResponse(
         _stream_generation(prompt, slide_count, file_text, url_text, image_payloads, db, level, user_outline),
         media_type="text/event-stream",
